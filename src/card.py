@@ -2,15 +2,24 @@ from __future__ import annotations
 
 import json
 
-from .classifier import DEFAULT_LABEL, FOLDED_LABELS
+from .classifier import DEFAULT_LABEL
 from .models import Post
 
 TEXT_FOLD_THRESHOLD = 500
 TEXT_PREVIEW_CHARS = 300
 REPOST_PREVIEW_CHARS = 300
 
-# 资本市场对海外读者价值最高，用醒目颜色区分
-_TEMPLATES = {"资本市场": "orange", "谍照申报": "turquoise", "出海信息": "green"}
+# 每个分类一个专属颜色（飞书卡片 header template）
+_TEMPLATES = {
+    "车圈热点": "red",
+    "产品发布": "blue",
+    "谍照申报": "turquoise",
+    "市场数据": "wathet",
+    "资本市场": "orange",
+    "出海信息": "green",
+    "政策监管": "violet",
+    "行业观察": "indigo",
+}
 
 
 def _fmt_duration(seconds: float | None) -> str:
@@ -29,12 +38,15 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
-def _content_elements(
-    post: Post, image_key: str | None, *, fold_images: bool = True
-) -> list[dict[str, object]]:
-    # 只留发帖时间；发送方式（客户端）和地理位置对编辑无用
+def build_post_card(post: Post, image_key: str | None = None, label: str = "") -> str:
+    label = label or DEFAULT_LABEL
+
+    # 标题是分类；作者、时间（和转发标记）放第一行
+    meta_parts = [f"**{post.screen_name}**", post.created_at.strftime("%m-%d %H:%M")]
+    if post.is_repost:
+        meta_parts.append("转发")
     elements: list[dict[str, object]] = [
-        {"tag": "markdown", "content": post.created_at.strftime("%Y-%m-%d %H:%M")}
+        {"tag": "markdown", "content": " · ".join(meta_parts)}
     ]
 
     text = post.text_plain.strip()
@@ -67,68 +79,41 @@ def _content_elements(
         elements.append({"tag": "markdown", "content": video_line})
 
     if image_key:
-        img = {
-            "tag": "img",
-            "img_key": image_key,
-            "alt": {"tag": "plain_text", "content": ""},
-        }
-        if fold_images:
-            # 图片默认折叠；广告/无关卡片整体已在折叠面板里，不再嵌套
-            total = len(post.image_urls)
-            panel_title = f"**查看图片（共 {total} 张）**" if total > 1 else "**查看图片**"
-            elements.append(
-                {
-                    "tag": "collapsible_panel",
-                    "expanded": False,
-                    "header": {"title": {"tag": "markdown", "content": panel_title}},
-                    "elements": [img],
-                }
-            )
-        else:
-            elements.append(img)
-    elif post.image_urls:
-        note = f"图片 {len(post.image_urls)} 张（未能上传）"
-        elements.append({"tag": "markdown", "content": note})
-
-    return elements
-
-
-def build_post_card(post: Post, image_key: str | None = None, label: str = "") -> str:
-    label = label or DEFAULT_LABEL
-    folded = label in FOLDED_LABELS
-    content = _content_elements(post, image_key, fold_images=not folded)
-
-    if folded:
-        elements: list[dict[str, object]] = [
+        total = len(post.image_urls)
+        panel_title = f"**查看图片（共 {total} 张）**" if total > 1 else "**查看图片**"
+        elements.append(
             {
                 "tag": "collapsible_panel",
                 "expanded": False,
-                "header": {"title": {"tag": "markdown", "content": f"**{label}** · 点开查看"}},
-                "elements": content,
+                "header": {"title": {"tag": "markdown", "content": panel_title}},
+                "elements": [
+                    {
+                        "tag": "img",
+                        "img_key": image_key,
+                        "alt": {"tag": "plain_text", "content": ""},
+                    }
+                ],
             }
-        ]
-    else:
-        elements = content
+        )
+    elif post.image_urls:
+        note = f"图片 {len(post.image_urls)} 张（未能上传）"
+        elements.append({"tag": "markdown", "content": note})
 
     elements.append(
         {
             "tag": "button",
             "text": {"tag": "plain_text", "content": "打开原帖"},
-            "type": "primary" if not folded else "default",
+            "type": "primary",
             "width": "default",
             "behaviors": [{"type": "open_url", "default_url": post.url}],
         }
     )
 
-    title = post.screen_name
-    if post.is_repost:
-        title += "（转发）"
-    title += f" · {label}"
     card = {
         "schema": "2.0",
         "header": {
-            "title": {"tag": "plain_text", "content": title},
-            "template": "grey" if folded else _TEMPLATES.get(label, "blue"),
+            "title": {"tag": "plain_text", "content": label},
+            "template": _TEMPLATES.get(label, "blue"),
         },
         "body": {"elements": elements},
     }

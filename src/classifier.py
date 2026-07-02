@@ -29,9 +29,6 @@ LABELS = (*CATEGORIES, LABEL_AD, LABEL_OFFTOPIC)
 # 分类失败/拿不准的回落值（正常展示，宁可放过不要误伤）
 DEFAULT_LABEL = "行业观察"
 
-# 广告折叠展示；汽车无关和非中国内容由 should_drop 直接不推送
-FOLDED_LABELS = (LABEL_AD,)
-
 
 @dataclass
 class Classification:
@@ -40,6 +37,8 @@ class Classification:
 
     def should_drop(self, settings: Settings) -> bool:
         if settings.drop_offtopic and self.label == LABEL_OFFTOPIC:
+            return True
+        if settings.drop_ads and self.label == LABEL_AD:
             return True
         return bool(settings.drop_non_china and not self.china)
 

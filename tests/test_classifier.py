@@ -21,14 +21,15 @@ def test_parse_result_falls_back():
 
 
 def test_should_drop_rules():
-    settings = Settings(drop_offtopic=True, drop_non_china=True)
+    settings = Settings(drop_offtopic=True, drop_ads=True, drop_non_china=True)
     assert Classification(label="汽车无关").should_drop(settings)
+    assert Classification(label="广告").should_drop(settings)
     assert Classification(label="产品发布", china=False).should_drop(settings)
     assert not Classification(label="产品发布", china=True).should_drop(settings)
-    assert not Classification(label="广告", china=True).should_drop(settings)  # 广告折叠不丢弃
 
-    lenient = Settings(drop_offtopic=False, drop_non_china=False)
+    lenient = Settings(drop_offtopic=False, drop_ads=False, drop_non_china=False)
     assert not Classification(label="汽车无关", china=False).should_drop(lenient)
+    assert not Classification(label="广告").should_drop(lenient)
 
 
 async def test_classify_disabled_returns_default():

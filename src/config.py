@@ -55,6 +55,7 @@ class Settings(BaseSettings):
     # 汽车无关和非中国内容直接不推送（可关）。
     classification_enabled: bool = True
     drop_offtopic: bool = True    # 汽车无关的帖子不推送
+    drop_ads: bool = True         # 广告不推送
     drop_non_china: bool = True   # 与中国汽车行业无关的内容不推送
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
