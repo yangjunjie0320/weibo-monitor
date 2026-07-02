@@ -2,14 +2,15 @@ from __future__ import annotations
 
 import json
 
-from .classifier import FOLDED_LABELS, LABEL_CONTENT, LABEL_OPINION
+from .classifier import DEFAULT_LABEL, FOLDED_LABELS
 from .models import Post
 
 TEXT_FOLD_THRESHOLD = 500
 TEXT_PREVIEW_CHARS = 300
 REPOST_PREVIEW_CHARS = 300
 
-_TEMPLATES = {LABEL_OPINION: "blue", LABEL_CONTENT: "blue"}
+# 资本市场对海外读者价值最高，用醒目颜色区分
+_TEMPLATES = {"资本市场": "orange", "谍照申报": "turquoise", "出海信息": "green"}
 
 
 def _fmt_duration(seconds: float | None) -> str:
@@ -97,7 +98,7 @@ def _content_elements(
 
 
 def build_post_card(post: Post, image_key: str | None = None, label: str = "") -> str:
-    label = label or LABEL_CONTENT
+    label = label or DEFAULT_LABEL
     folded = label in FOLDED_LABELS
     content = _content_elements(post, image_key, fold_images=not folded)
 

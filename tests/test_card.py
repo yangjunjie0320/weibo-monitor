@@ -2,7 +2,7 @@ import datetime as dt
 import json
 
 from src.card import build_post_card
-from src.classifier import LABEL_AD, LABEL_OFFTOPIC, LABEL_OPINION
+from src.classifier import LABEL_AD
 from src.models import Post, VideoInfo
 
 CST = dt.timezone(dt.timedelta(hours=8))
@@ -30,9 +30,9 @@ def find_button(card: dict) -> dict:
 
 
 def test_basic_card():
-    card = json.loads(build_post_card(make_post(), label=LABEL_OPINION))
+    card = json.loads(build_post_card(make_post(), label="市场数据"))
     assert card["schema"] == "2.0"
-    assert card["header"]["title"]["content"] == "测试博主 · 观点"
+    assert card["header"]["title"]["content"] == "测试博主 · 市场数据"
     dumped = json.dumps(card, ensure_ascii=False)
     assert "今天试驾了一台新车" in dumped
     assert "2026-07-01 12:30" in dumped
@@ -44,22 +44,26 @@ def test_basic_card():
     assert button["behaviors"][0]["default_url"] == "https://weibo.com/42/Babc"
 
 
-def test_default_label_is_content():
+def test_default_label():
     card = json.loads(build_post_card(make_post()))
-    assert card["header"]["title"]["content"] == "测试博主 · 内容"
+    assert card["header"]["title"]["content"] == "测试博主 · 行业观察"
     assert card["header"]["template"] == "blue"
 
 
-def test_ad_and_offtopic_fold():
-    for label in (LABEL_AD, LABEL_OFFTOPIC):
-        card = json.loads(build_post_card(make_post(), label=label))
-        assert card["header"]["template"] == "grey"
-        top_tags = [el["tag"] for el in card["body"]["elements"]]
-        # 正文整体收进折叠面板，按钮留在外面
-        assert top_tags == ["collapsible_panel", "button"]
-        panel = card["body"]["elements"][0]
-        assert panel["expanded"] is False
-        assert label in panel["header"]["title"]["content"]
+def test_capital_market_highlighted():
+    card = json.loads(build_post_card(make_post(), label="资本市场"))
+    assert card["header"]["template"] == "orange"
+
+
+def test_ad_folds():
+    card = json.loads(build_post_card(make_post(), label=LABEL_AD))
+    assert card["header"]["template"] == "grey"
+    top_tags = [el["tag"] for el in card["body"]["elements"]]
+    # 正文整体收进折叠面板，按钮留在外面
+    assert top_tags == ["collapsible_panel", "button"]
+    panel = card["body"]["elements"][0]
+    assert panel["expanded"] is False
+    assert LABEL_AD in panel["header"]["title"]["content"]
 
 
 def test_long_text_folds():
@@ -75,7 +79,7 @@ def test_repost_card():
         retweeted_text_plain="原帖内容",
     )
     card = json.loads(build_post_card(post))
-    assert card["header"]["title"]["content"] == "测试博主（转发） · 内容"
+    assert card["header"]["title"]["content"] == "测试博主（转发） · 行业观察"
     dumped = json.dumps(card, ensure_ascii=False)
     assert "@原作者" in dumped
     assert "原帖内容" in dumped

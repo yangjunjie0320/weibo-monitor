@@ -50,8 +50,12 @@ class Settings(BaseSettings):
     request_retries: int = 3
     send_retry_attempts: int = 3
 
-    # DeepSeek 内容分类（观点/内容/广告/汽车无关），广告和无关的卡片默认折叠
+    # DeepSeek 内容分类（车圈热点/产品发布/谍照申报/市场数据/资本市场/
+    # 出海信息/政策监管/行业观察/广告/汽车无关）。广告折叠展示；
+    # 汽车无关和非中国内容直接不推送（可关）。
     classification_enabled: bool = True
+    drop_offtopic: bool = True    # 汽车无关的帖子不推送
+    drop_non_china: bool = True   # 与中国汽车行业无关的内容不推送
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"

@@ -81,20 +81,32 @@ class PostPusher:
         self._dry_run = dry_run
 
     async def push(self, post: Post) -> bool:
-        label = await classify_post(post, self._settings, self._http_client)
+        result = await classify_post(post, self._settings, self._http_client)
+        if result.should_drop(self._settings):
+            # 视为已处理（返回 True 落 state），不再重试
+            logger.info(
+                "post dropped: name=%s mid=%s label=%s china=%s url=%s",
+                post.screen_name,
+                post.mid,
+                result.label,
+                result.china,
+                post.url,
+            )
+            return True
+
         image_key = None
         if post.image_urls and not self._dry_run:
             image_key = await upload_image(
                 post.image_urls[0], self._lark_client, self._http_client
             )
-        card_json = build_post_card(post, image_key, label)
+        card_json = build_post_card(post, image_key, result.label)
 
         if self._dry_run:
             logger.info(
                 "[dry-run] would push: name=%s mid=%s label=%s url=%s text=%s",
                 post.screen_name,
                 post.mid,
-                label,
+                result.label,
                 post.url,
                 post.text_plain[:80].replace("\n", " "),
             )

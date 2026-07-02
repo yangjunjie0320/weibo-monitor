@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+from dataclasses import dataclass
 
 import httpx
 
@@ -10,33 +11,79 @@ from .models import Post
 
 logger = logging.getLogger(__name__)
 
-LABEL_OPINION = "观点"
-LABEL_CONTENT = "内容"
+# 业务分类（来自编辑团队的分类清单）
+CATEGORIES = (
+    "车圈热点",
+    "产品发布",
+    "谍照申报",
+    "市场数据",
+    "资本市场",
+    "出海信息",
+    "政策监管",
+    "行业观察",
+)
 LABEL_AD = "广告"
 LABEL_OFFTOPIC = "汽车无关"
-LABELS = (LABEL_OPINION, LABEL_CONTENT, LABEL_AD, LABEL_OFFTOPIC)
+LABELS = (*CATEGORIES, LABEL_AD, LABEL_OFFTOPIC)
 
-# 折叠这两类；分类失败/拿不准一律回落到「内容」（宁可放过不要误伤）
-FOLDED_LABELS = (LABEL_AD, LABEL_OFFTOPIC)
+# 分类失败/拿不准的回落值（正常展示，宁可放过不要误伤）
+DEFAULT_LABEL = "行业观察"
 
-SYSTEM_PROMPT = """你是汽车行业微博内容分类器。给微博正文打一个标签，四选一：
-- 观点：作者对汽车行业、产品、公司、事件表达了明确的个人观点或评价
-- 内容：汽车相关的资讯、测评、体验、数据、日常分享等一般内容
+# 广告折叠展示；汽车无关和非中国内容由 should_drop 直接不推送
+FOLDED_LABELS = (LABEL_AD,)
+
+
+@dataclass
+class Classification:
+    label: str = DEFAULT_LABEL
+    china: bool = True
+
+    def should_drop(self, settings: Settings) -> bool:
+        if settings.drop_offtopic and self.label == LABEL_OFFTOPIC:
+            return True
+        return bool(settings.drop_non_china and not self.china)
+
+
+SYSTEM_PROMPT = """你是中国汽车行业微博内容分类器，为面向海外读者的中国汽车资讯编辑部筛选素材。
+
+输出两个字段：
+
+label，十选一：
+- 车圈热点：行业热点事件、舆论焦点、突发新闻
+- 产品发布：新车发布、上市、改款、配置与定价信息
+- 谍照申报：谍照、工信部申报图、未发布车型情报
+- 市场数据：销量、交付量、市场份额、价格走势等数据
+- 资本市场：融资、股价、IPO、并购、财报、组织与资本变动
+- 出海信息：中国车企在海外市场的动态
+- 政策监管：政策、法规、国标、监管动态
+- 行业观察：技术解读、评测体验、行业分析等一般内容
 - 广告：明显的商业推广、带货、抽奖、软文
-- 汽车无关：与汽车行业完全无关的内容
+- 汽车无关：与汽车行业完全无关（生活、娱乐等）
 
-规则：拿不准时一律选「内容」。只有非常确定时才用「广告」或「汽车无关」，宁可放过不要误伤。
-只输出 JSON：{"label": "<标签>"}"""
+china：布尔值，内容是否与中国汽车行业/中国市场/中国品牌相关。
+中国车企出海、外企在华动态都算 true；纯海外品牌在海外市场的新闻、
+单纯翻译转述外媒的内容为 false。
+
+规则：label 拿不准时选「行业观察」；china 拿不准时选 true。
+只有非常确定时才用「广告」「汽车无关」或 china=false，宁可放过不要误伤。
+只输出 JSON：{"label": "<标签>", "china": true 或 false}"""
 
 
-def parse_label(raw: str) -> str:
-    """解析模型输出；任何异常回落到「内容」。"""
+def parse_result(raw: str) -> Classification:
+    """解析模型输出；任何异常回落到默认（可见、china=true）。"""
     try:
         data = json.loads(raw)
     except (json.JSONDecodeError, TypeError):
-        return LABEL_CONTENT
-    label = str(data.get("label", "")).strip() if isinstance(data, dict) else ""
-    return label if label in LABELS else LABEL_CONTENT
+        return Classification()
+    if not isinstance(data, dict):
+        return Classification()
+    label = str(data.get("label", "")).strip()
+    if label not in LABELS:
+        label = DEFAULT_LABEL
+    china = data.get("china")
+    if not isinstance(china, bool):
+        china = True
+    return Classification(label=label, china=china)
 
 
 def _post_text(post: Post) -> str:
@@ -50,13 +97,13 @@ def _post_text(post: Post) -> str:
 
 async def classify_post(
     post: Post, settings: Settings, http_client: httpx.AsyncClient
-) -> str:
-    """给帖子打标签。未启用/无 key/调用失败都返回「内容」，不阻塞推送。"""
+) -> Classification:
+    """给帖子分类。未启用/无 key/调用失败都返回默认值，不阻塞推送。"""
     if not settings.classification_enabled or not settings.deepseek_api_key:
-        return LABEL_CONTENT
+        return Classification()
     text = _post_text(post)
     if not text:
-        return LABEL_CONTENT
+        return Classification()
 
     try:
         resp = await http_client.post(
@@ -78,8 +125,10 @@ async def classify_post(
         raw = resp.json()["choices"][0]["message"]["content"]
     except Exception as exc:
         logger.warning("classification failed mid=%s: %s", post.mid, exc)
-        return LABEL_CONTENT
+        return Classification()
 
-    label = parse_label(raw)
-    logger.info("post classified: mid=%s label=%s", post.mid, label)
-    return label
+    result = parse_result(raw)
+    logger.info(
+        "post classified: mid=%s label=%s china=%s", post.mid, result.label, result.china
+    )
+    return result
