@@ -28,7 +28,9 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
-def _content_elements(post: Post, image_key: str | None) -> list[dict[str, object]]:
+def _content_elements(
+    post: Post, image_key: str | None, *, fold_images: bool = True
+) -> list[dict[str, object]]:
     meta_parts = [post.created_at.strftime("%Y-%m-%d %H:%M")]
     if post.source:
         meta_parts.append(post.source)
@@ -68,13 +70,25 @@ def _content_elements(post: Post, image_key: str | None) -> list[dict[str, objec
         elements.append({"tag": "markdown", "content": video_line})
 
     if image_key:
-        elements.append(
-            {
-                "tag": "img",
-                "img_key": image_key,
-                "alt": {"tag": "plain_text", "content": ""},
-            }
-        )
+        img = {
+            "tag": "img",
+            "img_key": image_key,
+            "alt": {"tag": "plain_text", "content": ""},
+        }
+        if fold_images:
+            # 图片默认折叠；广告/无关卡片整体已在折叠面板里，不再嵌套
+            total = len(post.image_urls)
+            panel_title = f"**查看图片（共 {total} 张）**" if total > 1 else "**查看图片**"
+            elements.append(
+                {
+                    "tag": "collapsible_panel",
+                    "expanded": False,
+                    "header": {"title": {"tag": "markdown", "content": panel_title}},
+                    "elements": [img],
+                }
+            )
+        else:
+            elements.append(img)
     elif post.image_urls:
         note = f"图片 {len(post.image_urls)} 张（未能上传）"
         elements.append({"tag": "markdown", "content": note})
@@ -84,8 +98,8 @@ def _content_elements(post: Post, image_key: str | None) -> list[dict[str, objec
 
 def build_post_card(post: Post, image_key: str | None = None, label: str = "") -> str:
     label = label or LABEL_CONTENT
-    content = _content_elements(post, image_key)
     folded = label in FOLDED_LABELS
+    content = _content_elements(post, image_key, fold_images=not folded)
 
     if folded:
         elements: list[dict[str, object]] = [

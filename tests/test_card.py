@@ -81,15 +81,35 @@ def test_repost_card():
     assert "原帖内容" in dumped
 
 
-def test_image_and_video():
+def test_image_folded_in_panel():
     post = make_post(
-        image_urls=["https://wx1.sinaimg.cn/large/x.jpg"],
+        image_urls=["https://wx1.sinaimg.cn/large/x.jpg", "https://wx1.sinaimg.cn/y.jpg"],
         video=VideoInfo(title="试驾视频", duration=95),
     )
     with_key = json.loads(build_post_card(post, image_key="img_v3_xxx"))
-    tags = [el["tag"] for el in with_key["body"]["elements"]]
-    assert "img" in tags
+    # 图片收进默认折叠的面板，不直接出现在顶层
+    top_tags = [el["tag"] for el in with_key["body"]["elements"]]
+    assert "img" not in top_tags
+    panel = next(
+        el
+        for el in with_key["body"]["elements"]
+        if el["tag"] == "collapsible_panel" and "查看图片" in el["header"]["title"]["content"]
+    )
+    assert panel["expanded"] is False
+    assert panel["elements"][0]["tag"] == "img"
+    assert "共 2 张" in panel["header"]["title"]["content"]
     assert "1:35" in json.dumps(with_key, ensure_ascii=False)
 
     without_key = json.loads(build_post_card(post))
     assert "未能上传" in json.dumps(without_key, ensure_ascii=False)
+
+
+def test_folded_card_keeps_image_unnested():
+    post = make_post(image_urls=["https://wx1.sinaimg.cn/large/x.jpg"])
+    card = json.loads(build_post_card(post, image_key="img_v3_xxx", label=LABEL_AD))
+    outer = card["body"]["elements"][0]
+    assert outer["tag"] == "collapsible_panel"
+    # 外层已折叠，图片直接躺在里面，不嵌套第二层面板
+    inner_tags = [el["tag"] for el in outer["elements"]]
+    assert "img" in inner_tags
+    assert "collapsible_panel" not in inner_tags
