@@ -36,9 +36,10 @@ def test_basic_card():
     dumped = json.dumps(card, ensure_ascii=False)
     assert "今天试驾了一台新车" in dumped
     assert "2026-07-01 12:30" in dumped
-    # 互动数不再展示
+    # 互动数、发送方式、地理位置都不展示
     assert "转发 12" not in dumped
     assert "56789" not in dumped and "5.7万" not in dumped
+    assert "微博网页版" not in dumped
     # 打开原帖是按钮
     button = find_button(card)
     assert button["behaviors"][0]["default_url"] == "https://weibo.com/42/Babc"

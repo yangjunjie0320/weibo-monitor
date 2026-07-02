@@ -32,13 +32,9 @@ def _truncate(text: str, max_chars: int) -> str:
 def _content_elements(
     post: Post, image_key: str | None, *, fold_images: bool = True
 ) -> list[dict[str, object]]:
-    meta_parts = [post.created_at.strftime("%Y-%m-%d %H:%M")]
-    if post.source:
-        meta_parts.append(post.source)
-    if post.region_name:
-        meta_parts.append(post.region_name)
+    # 只留发帖时间；发送方式（客户端）和地理位置对编辑无用
     elements: list[dict[str, object]] = [
-        {"tag": "markdown", "content": " · ".join(meta_parts)}
+        {"tag": "markdown", "content": post.created_at.strftime("%Y-%m-%d %H:%M")}
     ]
 
     text = post.text_plain.strip()
