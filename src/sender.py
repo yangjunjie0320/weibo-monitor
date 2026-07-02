@@ -9,6 +9,7 @@ import tenacity
 from lark_oapi.api.im.v1 import CreateMessageRequest, CreateMessageRequestBody
 
 from .card import build_post_card
+from .classifier import classify_post
 from .config import Settings
 from .image_uploader import upload_image
 from .models import Post
@@ -80,18 +81,20 @@ class PostPusher:
         self._dry_run = dry_run
 
     async def push(self, post: Post) -> bool:
+        label = await classify_post(post, self._settings, self._http_client)
         image_key = None
         if post.image_urls and not self._dry_run:
             image_key = await upload_image(
                 post.image_urls[0], self._lark_client, self._http_client
             )
-        card_json = build_post_card(post, image_key)
+        card_json = build_post_card(post, image_key, label)
 
         if self._dry_run:
             logger.info(
-                "[dry-run] would push: name=%s mid=%s url=%s text=%s",
+                "[dry-run] would push: name=%s mid=%s label=%s url=%s text=%s",
                 post.screen_name,
                 post.mid,
+                label,
                 post.url,
                 post.text_plain[:80].replace("\n", " "),
             )

@@ -50,6 +50,13 @@ class Settings(BaseSettings):
     request_retries: int = 3
     send_retry_attempts: int = 3
 
+    # DeepSeek 内容分类（观点/内容/广告/汽车无关），广告和无关的卡片默认折叠
+    classification_enabled: bool = True
+    deepseek_api_key: str = ""
+    deepseek_base_url: str = "https://api.deepseek.com"
+    deepseek_model: str = "deepseek-chat"
+    classify_timeout: float = 15.0
+
     log_level: str = "INFO"
     log_dir: str = "logs"
 

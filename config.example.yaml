@@ -46,5 +46,13 @@ rate_limit_rest_seconds: 900
 # 飞书发送重试次数
 send_retry_attempts: 3
 
+# DeepSeek 内容分类：每条新帖打标签（观点/内容/广告/汽车无关），
+# 广告和汽车无关的卡片默认折叠。分类失败回落到「内容」（正常展示），不阻塞推送。
+classification_enabled: true
+deepseek_api_key: ""
+deepseek_base_url: "https://api.deepseek.com"
+deepseek_model: "deepseek-chat"
+classify_timeout: 15.0
+
 log_level: INFO
 log_dir: logs
