@@ -70,6 +70,20 @@ async def _export_cookies(context: Any, timeout_ms: int) -> list[dict[str, Any]]
     return _weibo_cookies(await context.cookies())
 
 
+async def _is_logged_in(context: Any) -> bool:
+    """用浏览器会话调 api/config 验证真实登录态。
+
+    weibo 给未登录访客也发 SUB cookie，仅凭 SUB 存在会误判（踩过的坑）。
+    """
+    try:
+        resp = await context.request.get("https://m.weibo.cn/api/config", timeout=15000)
+        data = await resp.json()
+        return bool((data.get("data") or {}).get("login"))
+    except Exception as exc:
+        logger.debug("login check failed: %s", exc)
+        return False
+
+
 async def refresh_weibo_cookie(settings: Settings) -> bool:
     """从持久 profile 无头导出新 cookie 写到 weibo_cookie_file。"""
     if not settings.weibo_cookie_file:
@@ -82,6 +96,12 @@ async def refresh_weibo_cookie(settings: Settings) -> bool:
             headless=settings.browser_headless,
             timeout_ms=timeout_ms,
         ) as context:
+            if not await _is_logged_in(context):
+                logger.warning(
+                    "browser profile is not logged in; run "
+                    "`python main.py --browser-login` once"
+                )
+                return False
             cookies = await _export_cookies(context, timeout_ms)
     except BrowserUnavailableError as exc:
         logger.warning("cookie refresh unavailable: %s", exc)
@@ -91,10 +111,7 @@ async def refresh_weibo_cookie(settings: Settings) -> bool:
         return False
 
     if not _has_required(cookies):
-        logger.warning(
-            "cookie refresh produced no logged-in session; run "
-            "`python main.py --browser-login` once"
-        )
+        logger.warning("cookie refresh export missing required cookies")
         return False
 
     write_cookie_file(cookies, settings.weibo_cookie_file)
@@ -137,12 +154,9 @@ async def browser_login(settings: Settings) -> bool:
             deadline = time.monotonic() + _LOGIN_WAIT_SECONDS
             cookies: list[dict[str, Any]] = []
             while time.monotonic() < deadline:
-                raw = await context.cookies()
-                logged_in = any(
-                    c.get("name") == "SUB" and "weibo.com" in str(c.get("domain", ""))
-                    for c in raw
-                )
-                if logged_in:
+                # 必须验证真实登录（api/config login=true）；
+                # 仅凭 SUB cookie 会把访客票据误判成登录
+                if await _is_logged_in(context):
                     cookies = await _export_cookies(context, timeout_ms)
                     if _has_required(cookies):
                         break
