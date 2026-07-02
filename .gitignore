@@ -1,6 +1,8 @@
 config.yaml
 .env
 state/
+cookies/
+browser-data/
 logs/
 .venv/
 __pycache__/

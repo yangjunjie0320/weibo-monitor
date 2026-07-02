@@ -8,6 +8,7 @@ import logging
 import re
 import time
 import urllib.parse
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -36,26 +37,68 @@ class WeiboError(Exception):
     pass
 
 
-class WeiboClient:
-    """m.weibo.cn container API 客户端，游客 cookie 免登录。
+class RateLimitedError(WeiboError):
+    """captcha/visitor 挑战：IP 级限流，重试无益，调用方应熔断休息。"""
 
-    cookie 在启动时获取，遇到 visitor/captcha 挑战时自动刷新并重试。
+
+def _load_static_cookie(settings: Settings) -> str:
+    if settings.weibo_cookie_file:
+        path = Path(settings.weibo_cookie_file)
+        if path.exists():
+            return path.read_text(encoding="utf-8").strip()
+        logger.warning("weibo_cookie_file not found: %s", path)
+    return settings.weibo_cookie.strip()
+
+
+class WeiboClient:
+    """m.weibo.cn container API 客户端。
+
+    配置了真实 cookie（weibo_cookie / weibo_cookie_file）时优先使用；
+    否则用游客 cookie（启动时获取，遇挑战自动换新）。真实 cookie 遇到
+    挑战时直接抛 RateLimitedError（换 cookie 无益，只能降速休息）。
     """
 
     def __init__(self, settings: Settings, http_client: httpx.AsyncClient) -> None:
         self._settings = settings
         self._http = http_client
-        self._cookie = ""
+        self._static = _load_static_cookie(settings)
+        self._cookie = self._static
+
+    @property
+    def uses_static_cookie(self) -> bool:
+        return bool(self._static)
+
+    def reload_static_cookie(self) -> None:
+        """cookie 文件被自动刷新后重新加载。"""
+        refreshed = _load_static_cookie(self._settings)
+        if refreshed and refreshed != self._static:
+            self._static = refreshed
+            self._cookie = refreshed
+            logger.info("static cookie reloaded")
+
+    async def ensure_cookie(self) -> None:
+        if self._static:
+            logger.info("using configured weibo cookie")
+            return
+        await self.refresh_visitor_cookie()
 
     async def request_json(self, url: str) -> dict[str, Any]:
         last_error: Exception | None = None
         for attempt in range(self._settings.request_retries + 1):
             try:
                 return await self._request_json_once(url)
+            except RateLimitedError as exc:
+                if self._static:
+                    raise  # 真实 cookie 被挑战，重试无益
+                last_error = exc
+                if attempt < self._settings.request_retries:
+                    await asyncio.sleep(0.8 * (attempt + 1))
             except (httpx.HTTPError, WeiboError, json.JSONDecodeError) as exc:
                 last_error = exc
                 if attempt < self._settings.request_retries:
                     await asyncio.sleep(0.8 * (attempt + 1))
+        if isinstance(last_error, RateLimitedError):
+            raise last_error
         raise WeiboError(f"request failed: {url}: {last_error}") from last_error
 
     async def _request_json_once(self, url: str) -> dict[str, Any]:
@@ -68,16 +111,18 @@ class WeiboClient:
             parsed = json.loads(text)
         except json.JSONDecodeError:
             if "Sina Visitor System" in text:
-                await self.refresh_visitor_cookie()
-                await asyncio.sleep(1.0)
-                raise WeiboError("visitor challenge") from None
+                if not self._static:
+                    await self.refresh_visitor_cookie()
+                    await asyncio.sleep(1.0)
+                raise RateLimitedError("visitor challenge") from None
             raise
         if not isinstance(parsed, dict):
             raise WeiboError(f"unexpected response shape: {text[:200]}")
         if parsed.get("ok") == -100 and "captcha" in str(parsed.get("url", "")):
-            await self.refresh_visitor_cookie()
-            await asyncio.sleep(2.0)
-            raise WeiboError("captcha challenge")
+            if not self._static:
+                await self.refresh_visitor_cookie()
+                await asyncio.sleep(2.0)
+            raise RateLimitedError("captcha challenge")
         return parsed
 
     async def refresh_visitor_cookie(self) -> None:

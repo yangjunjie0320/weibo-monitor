@@ -51,7 +51,7 @@ async def _run(settings: Settings, *, once: bool, dry_run: bool) -> None:
 
     async with httpx.AsyncClient() as http_client:
         weibo_client = WeiboClient(settings, http_client)
-        await weibo_client.refresh_visitor_cookie()
+        await weibo_client.ensure_cookie()
 
         state = StateStore(settings.state_file, settings.seen_mids_per_account)
         pusher = PostPusher(settings, lark_client, http_client, dry_run=dry_run)
@@ -73,6 +73,11 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Weibo monitor: push new posts to Feishu")
     parser.add_argument("--config", metavar="PATH", help="YAML config file path")
     parser.add_argument("--list-chats", action="store_true", help="list chats the bot is in")
+    parser.add_argument(
+        "--browser-login",
+        action="store_true",
+        help="open a headed browser to log in to weibo once (seeds the cookie profile)",
+    )
     parser.add_argument("--once", action="store_true", help="run a single poll cycle and exit")
     parser.add_argument(
         "--dry-run", action="store_true", help="fetch and diff but log instead of sending"
@@ -90,6 +95,12 @@ def main() -> None:
         for chat_id, name in list_chats(build_lark_client(settings)):
             print(f"{chat_id}\t{name}")
         return
+
+    if args.browser_login:
+        from src.cookie_refresh import browser_login
+
+        ok = asyncio.run(browser_login(settings))
+        sys.exit(0 if ok else 1)
 
     try:
         asyncio.run(_run(settings, once=args.once, dry_run=args.dry_run))

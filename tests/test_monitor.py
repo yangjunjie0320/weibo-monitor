@@ -59,6 +59,7 @@ def make_monitor(tmp_path, pages, *, state=None, pusher=None):
         account_delay_min_seconds=0,
         account_delay_max_seconds=0,
         state_file=str(tmp_path / "seen.json"),
+        cookie_refresh_enabled=False,
     )
     state = state or StateStore(settings.state_file)
     pusher = pusher or FakePusher()
@@ -148,6 +149,30 @@ async def test_pagination_stops_at_seen_post(tmp_path):
     assert [p.mid for p in pusher.pushed] == ["m2", "m3"]
     assert summary["pushed"] == 2
     assert not state.is_seen("42", "m0")
+
+
+async def test_rate_limited_aborts_cycle(tmp_path):
+    from src.weibo import RateLimitedError
+
+    class LimitedWeibo(FakeWeibo):
+        async def timeline_page(self, uid: str, page: int) -> dict:
+            raise RateLimitedError("captcha challenge")
+
+    settings = Settings(
+        account_delay_min_seconds=0,
+        account_delay_max_seconds=0,
+        state_file=str(tmp_path / "seen.json"),
+        cookie_refresh_enabled=False,
+    )
+    state = StateStore(settings.state_file)
+    pusher = FakePusher()
+    accounts = [ACCOUNT, Account(name="第二个", uid="43")]
+    monitor = Monitor(settings, LimitedWeibo({}), state, pusher, accounts)
+
+    summary = await monitor.run_cycle()
+    # 熔断：第一个账号触发限流后本轮中止，不再打第二个账号
+    assert summary["rate_limited"] == 1
+    assert summary["failed"] == 1
 
 
 async def test_new_pinned_post_within_age_is_pushed(tmp_path):

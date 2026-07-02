@@ -8,9 +8,10 @@ import time
 from typing import Any, Protocol
 
 from .config import Settings
+from .cookie_refresh import ensure_fresh_cookie
 from .models import Account, Post
 from .state import StateStore
-from .weibo import WeiboClient, WeiboError, extract_mblogs, parse_post
+from .weibo import RateLimitedError, WeiboClient, WeiboError, extract_mblogs, parse_post
 
 logger = logging.getLogger(__name__)
 
@@ -37,16 +38,22 @@ class Monitor:
     async def run_forever(self) -> None:
         while True:
             started = time.monotonic()
+            summary: dict[str, int] = {}
             try:
-                await self.run_cycle()
+                summary = await self.run_cycle()
             except Exception:
                 logger.exception("cycle failed unexpectedly")
             elapsed = time.monotonic() - started
             delay = max(self._settings.poll_interval_seconds - elapsed, 30.0)
+            if summary.get("rate_limited"):
+                delay = max(delay, self._settings.rate_limit_rest_seconds)
+                logger.warning("rate limited, resting %.0fs before next cycle", delay)
             logger.info("cycle done in %.0fs, next in %.0fs", elapsed, delay)
             await asyncio.sleep(delay)
 
     async def run_cycle(self) -> dict[str, int]:
+        if await ensure_fresh_cookie(self._settings):
+            self._client.reload_static_cookie()
         accounts = list(self._accounts)
         random.shuffle(accounts)
         summary = {"accounts": len(accounts), "new": 0, "pushed": 0, "failed": 0}
@@ -56,6 +63,17 @@ class Monitor:
                 new, pushed = await self._poll_account(account)
                 summary["new"] += new
                 summary["pushed"] += pushed
+            except RateLimitedError as exc:
+                summary["failed"] += 1
+                summary["rate_limited"] = 1
+                logger.warning(
+                    "rate limited at account %s (uid=%s), aborting cycle: %s",
+                    account.name,
+                    account.uid,
+                    exc,
+                )
+                self._state.save()
+                break
             except Exception as exc:
                 summary["failed"] += 1
                 logger.warning(
