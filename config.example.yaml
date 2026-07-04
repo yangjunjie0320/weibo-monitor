@@ -34,14 +34,16 @@ browser_timeout: 60.0
 cookie_stale_seconds: 259200        # cookie 文件超 3 天自动刷新
 cookie_refresh_min_interval: 3600   # 进程内刷新节流（秒）
 
-# 反爬节流：账号间随机延迟区间（秒）
-account_delay_min_seconds: 2.0
-account_delay_max_seconds: 4.0
+# 反爬节流：账号间随机延迟区间（秒）。2026-07 曾因请求过密触发 IP 级封禁，勿调小
+account_delay_min_seconds: 8.0
+account_delay_max_seconds: 15.0
 request_timeout: 20.0
 request_retries: 3
 
-# 触发限流（captcha）后本轮熔断，至少休息这么久再开下一轮
+# 触发限流（captcha）后本轮熔断，至少休息这么久再开下一轮；
+# 连续限流按 900 → 1800 → 3600 指数退避，封顶 rate_limit_rest_max_seconds
 rate_limit_rest_seconds: 900
+rate_limit_rest_max_seconds: 14400
 
 # 飞书发送重试次数
 send_retry_attempts: 3

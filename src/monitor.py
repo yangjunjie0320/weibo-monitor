@@ -36,6 +36,7 @@ class Monitor:
         self._accounts = accounts
 
     async def run_forever(self) -> None:
+        rate_limited_streak = 0
         while True:
             started = time.monotonic()
             summary: dict[str, int] = {}
@@ -46,8 +47,19 @@ class Monitor:
             elapsed = time.monotonic() - started
             delay = max(self._settings.poll_interval_seconds - elapsed, 30.0)
             if summary.get("rate_limited"):
-                delay = max(delay, self._settings.rate_limit_rest_seconds)
-                logger.warning("rate limited, resting %.0fs before next cycle", delay)
+                rate_limited_streak += 1
+                rest = min(
+                    self._settings.rate_limit_rest_seconds * 2 ** (rate_limited_streak - 1),
+                    self._settings.rate_limit_rest_max_seconds,
+                )
+                delay = max(delay, rest)
+                logger.warning(
+                    "rate limited %d cycle(s) in a row, resting %.0fs before next cycle",
+                    rate_limited_streak,
+                    delay,
+                )
+            else:
+                rate_limited_streak = 0
             logger.info("cycle done in %.0fs, next in %.0fs", elapsed, delay)
             await asyncio.sleep(delay)
 

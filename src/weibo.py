@@ -5,6 +5,7 @@ import datetime as dt
 import html
 import json
 import logging
+import random
 import re
 import time
 import urllib.parse
@@ -18,12 +19,31 @@ from .models import Account, Post, VideoInfo
 
 logger = logging.getLogger(__name__)
 
-MOBILE_HEADERS = {
-    "User-Agent": (
+# UA 池：每个游客会话固定一个 UA（请求间换 UA 反而像机器人）
+USER_AGENTS = [
+    (
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/136.0.0.0 Safari/537.36 Edg/136.0.0.0"
     ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/137.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/136.0.0.0 Safari/537.36"
+    ),
+    (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/135.0.0.0 Safari/537.36"
+    ),
+]
+
+MOBILE_HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
     "Referer": "https://m.weibo.cn/",
@@ -63,6 +83,12 @@ class WeiboClient:
         self._http = http_client
         self._static = _load_static_cookie(settings)
         self._cookie = self._static
+        self._ua = random.choice(USER_AGENTS)
+
+    def _headers(self) -> dict[str, str]:
+        headers = dict(MOBILE_HEADERS)
+        headers["User-Agent"] = self._ua
+        return headers
 
     @property
     def uses_static_cookie(self) -> bool:
@@ -102,7 +128,7 @@ class WeiboClient:
         raise WeiboError(f"request failed: {url}: {last_error}") from last_error
 
     async def _request_json_once(self, url: str) -> dict[str, Any]:
-        headers = dict(MOBILE_HEADERS)
+        headers = self._headers()
         if self._cookie:
             headers["Cookie"] = self._cookie
         resp = await self._http.get(url, headers=headers, timeout=self._settings.request_timeout)
@@ -126,6 +152,7 @@ class WeiboClient:
         return parsed
 
     async def refresh_visitor_cookie(self) -> None:
+        self._ua = random.choice(USER_AGENTS)  # 新游客身份配新 UA
         payload = {
             "cb": "visitor_gray_callback",
             "ver": "20250916",
@@ -139,7 +166,7 @@ class WeiboClient:
         resp = await self._http.post(
             "https://visitor.passport.weibo.cn/visitor/genvisitor2",
             data=payload,
-            headers=dict(MOBILE_HEADERS),
+            headers=self._headers(),
             timeout=self._settings.request_timeout,
         )
         match = re.search(r"visitor_gray_callback\((\{.*\})\);?", resp.text)
@@ -156,7 +183,7 @@ class WeiboClient:
 
     async def _warmup(self) -> None:
         try:
-            headers = dict(MOBILE_HEADERS)
+            headers = self._headers()
             headers["Cookie"] = self._cookie
             await self._http.get("https://m.weibo.cn/", headers=headers, timeout=10)
         except httpx.HTTPError:

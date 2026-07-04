@@ -36,16 +36,18 @@ class Settings(BaseSettings):
     cookie_stale_seconds: int = 86400 * 3      # 文件超过 3 天算过期
     cookie_refresh_min_interval: int = 3600    # 进程内刷新节流
 
-    # 触发限流（captcha 挑战）后本轮熔断，至少休息这么久再开下一轮
+    # 触发限流（captcha 挑战）后本轮熔断，至少休息这么久再开下一轮；
+    # 连续限流时指数退避（900 → 1800 → 3600 → ...），封顶 rate_limit_rest_max_seconds
     rate_limit_rest_seconds: int = 900
+    rate_limit_rest_max_seconds: int = 14400
 
     poll_interval_seconds: int = 600
     max_post_age_hours: int = 24
     max_pages_per_account: int = 3
     seen_mids_per_account: int = 200
 
-    account_delay_min_seconds: float = 2.0
-    account_delay_max_seconds: float = 4.0
+    account_delay_min_seconds: float = 8.0
+    account_delay_max_seconds: float = 15.0
     request_timeout: float = 20.0
     request_retries: int = 3
     send_retry_attempts: int = 3
