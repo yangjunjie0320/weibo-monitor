@@ -80,16 +80,22 @@ def test_repost_marker_and_quote():
     assert "原帖内容" in dumped
 
 
-def test_image_inline_in_body():
+def test_image_folded_as_markdown():
     post = make_post(
         image_urls=["https://wx1.sinaimg.cn/large/x.jpg", "https://wx1.sinaimg.cn/y.jpg"],
         video=VideoInfo(title="试驾视频", duration=95),
     )
     with_key = json.loads(build_post_card(post, image_key="img_v3_xxx"))
-    img = next(el for el in with_key["body"]["elements"] if el["tag"] == "img")
-    assert img["img_key"] == "img_v3_xxx"
-    assert img["preview"] is True
-    assert "共 2 张" in json.dumps(with_key, ensure_ascii=False)
+    top_tags = [el["tag"] for el in with_key["body"]["elements"]]
+    assert "img" not in top_tags  # img 组件在折叠面板里渲染不稳定，必须走 markdown
+    panel = next(
+        el
+        for el in with_key["body"]["elements"]
+        if el["tag"] == "collapsible_panel" and "查看图片" in el["header"]["title"]["content"]
+    )
+    assert panel["expanded"] is False
+    assert "共 2 张" in panel["header"]["title"]["content"]
+    assert panel["elements"][0] == {"tag": "markdown", "content": "![图片](img_v3_xxx)"}
     assert "1:35" in json.dumps(with_key, ensure_ascii=False)
 
     without_key = json.loads(build_post_card(post))

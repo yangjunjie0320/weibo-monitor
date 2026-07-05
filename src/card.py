@@ -79,20 +79,19 @@ def build_post_card(post: Post, image_key: str | None = None, label: str = "") -
         elements.append({"tag": "markdown", "content": video_line})
 
     if image_key:
-        # 图片直接放正文：折叠面板内的 img 未被文档支持，展开后时常渲染不出来
+        # 折叠面板内必须用 markdown 图片语法：img 组件在面板里渲染时有时无
         total = len(post.image_urls)
+        panel_title = f"**查看图片（共 {total} 张）**" if total > 1 else "**查看图片**"
         elements.append(
             {
-                "tag": "img",
-                "img_key": image_key,
-                "alt": {"tag": "plain_text", "content": ""},
-                "preview": True,
+                "tag": "collapsible_panel",
+                "expanded": False,
+                "header": {"title": {"tag": "markdown", "content": panel_title}},
+                "elements": [
+                    {"tag": "markdown", "content": f"![图片]({image_key})"}
+                ],
             }
         )
-        if total > 1:
-            elements.append(
-                {"tag": "markdown", "content": f"共 {total} 张图，其余见原帖"}
-            )
     elif post.image_urls:
         note = f"图片 {len(post.image_urls)} 张（未能上传）"
         elements.append({"tag": "markdown", "content": note})
