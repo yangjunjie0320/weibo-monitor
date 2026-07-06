@@ -48,6 +48,17 @@ rate_limit_rest_max_seconds: 14400
 # 飞书发送重试次数
 send_retry_attempts: 3
 
+# 卡片打分：卡片底部三分/两分/一分按钮，点击后原卡片变"已打分"。
+# 依赖开放平台配置：事件与回调 → 回调订阅方式改为"使用长连接接收回调"；
+# 多维表格需追加 bitable:app 权限，且机器人是表格的可编辑协作者。
+rating_enabled: true
+forward_chat_id: ""             # 三分帖子自动转发的目标群（--list-chats 查）
+bitable_url: ""                 # 打分记录多维表格分享链接，如 https://xxx.feishu.cn/base/xxxx
+bitable_table_name: "打分记录"   # 数据表名，不存在会自动创建
+bitable_sync_interval_seconds: 600  # 打分记录同步到多维表格的周期（秒）
+card_store_file: "state/cards.json"
+ratings_file: "state/ratings.json"
+
 # DeepSeek 内容分类：每条新帖打标签（观点/内容/广告/汽车无关），
 # 广告和汽车无关的卡片默认折叠。分类失败回落到「内容」（正常展示），不阻塞推送。
 classification_enabled: true

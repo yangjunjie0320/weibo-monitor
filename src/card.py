@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-import json
+import copy
 
 from .classifier import DEFAULT_LABEL
 from .models import Post
@@ -38,13 +38,77 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
-def build_post_card(post: Post, image_key: str | None = None, label: str = "") -> str:
+def _rating_row(post: Post) -> dict[str, object]:
+    """三档打分按钮横排。点击走 card.action.trigger 回调（长连接监听）。"""
+
+    def btn(text: str, score: int, style: str) -> dict[str, object]:
+        return {
+            "tag": "button",
+            "text": {"tag": "plain_text", "content": text},
+            "type": style,
+            "width": "fill",
+            "behaviors": [
+                {
+                    "type": "callback",
+                    "value": {
+                        "action": "rate",
+                        "score": score,
+                        "mid": post.mid,
+                        "uid": post.uid,
+                    },
+                }
+            ],
+        }
+
+    buttons = [btn("三分", 3, "primary"), btn("两分", 2, "default"), btn("一分", 1, "default")]
+    return {
+        "tag": "column_set",
+        "columns": [
+            {"tag": "column", "width": "weighted", "weight": 1, "elements": [b]}
+            for b in buttons
+        ],
+    }
+
+
+def _is_rating_row(element: dict) -> bool:
+    if element.get("tag") != "column_set":
+        return False
+    for column in element.get("columns", []):
+        for el in column.get("elements", []):
+            for behavior in el.get("behaviors", []):
+                value = behavior.get("value") or {}
+                if behavior.get("type") == "callback" and value.get("action") == "rate":
+                    return True
+    return False
+
+
+def mark_rated(card: dict, score: int) -> dict:
+    """把打分按钮行替换成"已打分"文案，供 patch 原卡片用。"""
+    card = copy.deepcopy(card)
+    elements = card.get("body", {}).get("elements", [])
+    replacement = {"tag": "markdown", "content": f"**已打分：{score} 分**"}
+    for index, element in enumerate(elements):
+        if _is_rating_row(element):
+            elements[index] = replacement
+            return card
+    elements.append(replacement)
+    return card
+
+
+def build_post_card(
+    post: Post,
+    image_key: str | None = None,
+    label: str = "",
+    *,
+    with_rating: bool = True,
+) -> dict:
     label = label or DEFAULT_LABEL
 
-    # 标题是分类；作者、时间（和转发标记）放第一行
+    # 标题是分类；作者、时间（和转发标记）、原帖链接放第一行
     meta_parts = [f"**{post.screen_name}**", post.created_at.strftime("%m-%d %H:%M")]
     if post.is_repost:
         meta_parts.append("转发")
+    meta_parts.append(f"[原帖]({post.url})")
     elements: list[dict[str, object]] = [
         {"tag": "markdown", "content": " · ".join(meta_parts)}
     ]
@@ -96,17 +160,10 @@ def build_post_card(post: Post, image_key: str | None = None, label: str = "") -
         note = f"图片 {len(post.image_urls)} 张（未能上传）"
         elements.append({"tag": "markdown", "content": note})
 
-    elements.append(
-        {
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": "打开原帖"},
-            "type": "primary",
-            "width": "default",
-            "behaviors": [{"type": "open_url", "default_url": post.url}],
-        }
-    )
+    if with_rating:
+        elements.append(_rating_row(post))
 
-    card = {
+    return {
         "schema": "2.0",
         "header": {
             "title": {"tag": "plain_text", "content": label},
@@ -114,4 +171,3 @@ def build_post_card(post: Post, image_key: str | None = None, label: str = "") -
         },
         "body": {"elements": elements},
     }
-    return json.dumps(card, ensure_ascii=False)

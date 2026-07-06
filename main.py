@@ -11,9 +11,13 @@ import lark_oapi as lark
 import yaml
 
 from src import log
+from src.bitable import BitableSyncer
+from src.card_store import CardStore
 from src.config import Settings
+from src.listener import CardActionListener
 from src.models import Account
 from src.monitor import Monitor
+from src.rating import RatingService, RatingStore
 from src.sender import PostPusher
 from src.state import StateStore
 from src.weibo import WeiboClient
@@ -39,6 +43,25 @@ def build_lark_client(settings: Settings) -> lark.Client:
     )
 
 
+async def _consume_ratings(listener: CardActionListener, service: RatingService) -> None:
+    logger = logging.getLogger(__name__)
+    async for event in listener.listen():
+        try:
+            await service.process(event)
+        except Exception:
+            logger.exception("rating process failed: mid=%s", event.mid)
+
+
+def _log_task_death(task: asyncio.Task) -> None:
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logging.getLogger(__name__).critical(
+            "background task %s died: %s", task.get_name(), exc
+        )
+
+
 async def _run(settings: Settings, *, once: bool, dry_run: bool) -> None:
     logger = logging.getLogger(__name__)
     accounts = load_accounts(settings.accounts_file)
@@ -53,20 +76,51 @@ async def _run(settings: Settings, *, once: bool, dry_run: bool) -> None:
         weibo_client = WeiboClient(settings, http_client)
         await weibo_client.ensure_cookie()
 
+        rating_on = settings.rating_enabled and lark_client is not None
+        card_store = CardStore(settings.card_store_file) if rating_on else None
+
         state = StateStore(settings.state_file, settings.seen_mids_per_account)
-        pusher = PostPusher(settings, lark_client, http_client, dry_run=dry_run)
+        pusher = PostPusher(
+            settings, lark_client, http_client, card_store=card_store, dry_run=dry_run
+        )
         monitor = Monitor(settings, weibo_client, state, pusher, accounts)
 
         logger.info(
-            "weibo-monitor started: accounts=%d interval=%ds dry_run=%s",
+            "weibo-monitor started: accounts=%d interval=%ds dry_run=%s rating=%s",
             len(accounts),
             settings.poll_interval_seconds,
             dry_run,
+            rating_on,
         )
         if once:
             await monitor.run_cycle()
-        else:
+            return
+
+        # 打分侧任务（长连接监听 + 多维表格同步）与轮询并行；
+        # 它们意外挂掉只记日志，不拖垮监控主循环
+        side_tasks: list[asyncio.Task] = []
+        if rating_on:
+            rating_store = RatingStore(settings.ratings_file)
+            service = RatingService(settings, lark_client, card_store, rating_store)
+            listener = CardActionListener(settings, service.accept)
+            side_tasks.append(
+                asyncio.create_task(_consume_ratings(listener, service), name="rating-listener")
+            )
+            if settings.bitable_url:
+                syncer = BitableSyncer(settings, lark_client, rating_store)
+                side_tasks.append(
+                    asyncio.create_task(syncer.run_forever(), name="bitable-sync")
+                )
+            else:
+                logger.warning("rating enabled but bitable_url not set, scores stay local")
+        for task in side_tasks:
+            task.add_done_callback(_log_task_death)
+
+        try:
             await monitor.run_forever()
+        finally:
+            for task in side_tasks:
+                task.cancel()
 
 
 def main() -> None:
