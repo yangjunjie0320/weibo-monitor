@@ -106,7 +106,7 @@ class PostPusher:
                 post.image_urls[0], self._lark_client, self._http_client
             )
         card = build_post_card(
-            post, image_key, result.label, with_rating=self._settings.rating_enabled
+            post, image_key, result.label, with_forward=self._settings.forward_enabled
         )
 
         if self._dry_run:

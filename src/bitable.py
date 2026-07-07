@@ -22,7 +22,7 @@ from lark_oapi.api.bitable.v1 import (
 from lark_oapi.api.wiki.v2 import GetNodeSpaceRequest
 
 from .config import Settings
-from .rating import RatingStore
+from .forward import ForwardStore
 
 logger = logging.getLogger(__name__)
 
@@ -32,10 +32,9 @@ _FIELDS = [
     ("分类", 1),
     ("摘要", 1),
     ("原帖链接", 15),
-    ("分数", 2),
-    ("打分人", 1),
+    ("转发人", 1),
     ("发帖时间", 5),
-    ("打分时间", 5),
+    ("转发时间", 5),
     ("mid", 1),
 ]
 
@@ -62,13 +61,13 @@ def _to_ms(iso: str) -> int | None:
 
 
 class BitableSyncer:
-    """把本地打分记录周期性批量写入多维表格。
+    """把本地转发归档记录周期性批量写入多维表格。
 
     表格由用户手建（机器人需为可编辑协作者），数据表和字段不存在则自动创建。
     全部 lark 调用是同步 SDK，整个同步体放线程池里跑。
     """
 
-    def __init__(self, settings: Settings, client: lark.Client, store: RatingStore) -> None:
+    def __init__(self, settings: Settings, client: lark.Client, store: ForwardStore) -> None:
         self._settings = settings
         self._client = client
         self._store = store
@@ -120,8 +119,7 @@ class BitableSyncer:
             "博主": rec.get("screen_name", ""),
             "分类": rec.get("label", ""),
             "摘要": rec.get("summary", ""),
-            "分数": rec.get("score", 0),
-            "打分人": rec.get("rater_name") or rec.get("rater_open_id", ""),
+            "转发人": rec.get("forwarder_name") or rec.get("forwarder_open_id", ""),
             "mid": mid,
         }
         if rec.get("url"):
@@ -129,9 +127,9 @@ class BitableSyncer:
         posted = _to_ms(rec.get("post_created_at", ""))
         if posted:
             fields["发帖时间"] = posted
-        rated = _to_ms(rec.get("rated_at", ""))
-        if rated:
-            fields["打分时间"] = rated
+        forwarded = _to_ms(rec.get("forwarded_at", ""))
+        if forwarded:
+            fields["转发时间"] = forwarded
         return fields
 
     def _ensure_table(self) -> None:

@@ -22,15 +22,15 @@ class Settings(BaseSettings):
     accounts_file: str = "accounts.yaml"
     state_file: str = "state/seen.json"
 
-    # 卡片打分：三分/两分/一分按钮，回调走长连接（需在开放平台把回调订阅
-    # 方式设为长连接）。打分记录先落本地，再周期同步到多维表格。
-    rating_enabled: bool = True
-    forward_chat_id: str = ""       # 三分帖子自动转发的目标群（--list-chats 查）
-    bitable_url: str = ""           # 打分记录多维表格分享链接（机器人需可编辑）
-    bitable_table_name: str = "打分记录"
+    # 卡片转发按钮：点击转发到目标群，回调走长连接（需在开放平台把回调订阅
+    # 方式设为长连接）。转发记录先落本地，再周期同步到多维表格归档。
+    forward_enabled: bool = True
+    forward_chat_id: str = ""       # 转发目标群（--list-chats 查）
+    bitable_url: str = ""           # 归档多维表格分享链接（机器人需可编辑）
+    bitable_table_name: str = "转发归档"
     bitable_sync_interval_seconds: int = 600
     card_store_file: str = "state/cards.json"
-    ratings_file: str = "state/ratings.json"
+    forwarded_file: str = "state/forwarded.json"
 
     # 真实登录 cookie（可选）。填了就不用游客 cookie。
     # 字符串形如 "SUB=...; SUBP=...; ..."（浏览器登录 weibo.com 后从开发者工具复制）。

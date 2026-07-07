@@ -38,57 +38,37 @@ def _truncate(text: str, max_chars: int) -> str:
     return text[: max_chars - 1].rstrip() + "…"
 
 
-def _rating_row(post: Post) -> dict[str, object]:
-    """三档打分按钮横排。点击走 card.action.trigger 回调（长连接监听）。"""
-
-    def btn(text: str, score: int, style: str) -> dict[str, object]:
-        return {
-            "tag": "button",
-            "text": {"tag": "plain_text", "content": text},
-            "type": style,
-            "width": "fill",
-            "behaviors": [
-                {
-                    "type": "callback",
-                    "value": {
-                        "action": "rate",
-                        "score": score,
-                        "mid": post.mid,
-                        "uid": post.uid,
-                    },
-                }
-            ],
-        }
-
-    buttons = [btn("三分", 3, "primary"), btn("两分", 2, "default"), btn("一分", 1, "default")]
+def _forward_button(post: Post) -> dict[str, object]:
+    """转发按钮。点击走 card.action.trigger 回调（长连接监听）。"""
     return {
-        "tag": "column_set",
-        "columns": [
-            {"tag": "column", "width": "weighted", "weight": 1, "elements": [b]}
-            for b in buttons
+        "tag": "button",
+        "text": {"tag": "plain_text", "content": "转发"},
+        "type": "primary",
+        "width": "default",
+        "behaviors": [
+            {
+                "type": "callback",
+                "value": {"action": "forward", "mid": post.mid, "uid": post.uid},
+            }
         ],
     }
 
 
-def _is_rating_row(element: dict) -> bool:
-    if element.get("tag") != "column_set":
-        return False
-    for column in element.get("columns", []):
-        for el in column.get("elements", []):
-            for behavior in el.get("behaviors", []):
-                value = behavior.get("value") or {}
-                if behavior.get("type") == "callback" and value.get("action") == "rate":
-                    return True
+def _is_forward_button(element: dict) -> bool:
+    for behavior in element.get("behaviors", []):
+        value = behavior.get("value") or {}
+        if behavior.get("type") == "callback" and value.get("action") == "forward":
+            return True
     return False
 
 
-def mark_rated(card: dict, score: int) -> dict:
-    """把打分按钮行替换成"已打分"文案，供 patch 原卡片用。"""
+def mark_forwarded(card: dict) -> dict:
+    """把转发按钮替换成"已转发"文案，供 patch 原卡片用。"""
     card = copy.deepcopy(card)
     elements = card.get("body", {}).get("elements", [])
-    replacement = {"tag": "markdown", "content": f"**已打分：{score} 分**"}
+    replacement = {"tag": "markdown", "content": "**已转发**"}
     for index, element in enumerate(elements):
-        if _is_rating_row(element):
+        if _is_forward_button(element):
             elements[index] = replacement
             return card
     elements.append(replacement)
@@ -100,7 +80,7 @@ def build_post_card(
     image_key: str | None = None,
     label: str = "",
     *,
-    with_rating: bool = True,
+    with_forward: bool = True,
 ) -> dict:
     label = label or DEFAULT_LABEL
 
@@ -160,8 +140,8 @@ def build_post_card(
         note = f"图片 {len(post.image_urls)} 张（未能上传）"
         elements.append({"tag": "markdown", "content": note})
 
-    if with_rating:
-        elements.append(_rating_row(post))
+    if with_forward:
+        elements.append(_forward_button(post))
 
     return {
         "schema": "2.0",

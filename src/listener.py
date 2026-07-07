@@ -19,8 +19,7 @@ logger = logging.getLogger(__name__)
 
 
 @dataclass
-class RateEvent:
-    score: int
+class ForwardEvent:
     mid: str
     uid: str
     message_id: str
@@ -36,17 +35,17 @@ class CardActionListener:
     """
 
     def __init__(
-        self, settings: Settings, accept: Callable[[RateEvent], tuple[bool, str]]
+        self, settings: Settings, accept: Callable[[ForwardEvent], tuple[bool, str]]
     ) -> None:
         self._settings = settings
         self._accept = accept
-        self._queue: asyncio.Queue[RateEvent] = asyncio.Queue()
+        self._queue: asyncio.Queue[ForwardEvent] = asyncio.Queue()
 
-    async def listen(self) -> AsyncIterator[RateEvent]:
+    async def listen(self) -> AsyncIterator[ForwardEvent]:
         loop = asyncio.get_running_loop()
 
         def on_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
-            event = _parse_rate_event(data)
+            event = _parse_forward_event(data)
             if event is None:
                 logger.warning("card action ignored: unrecognized payload")
                 return P2CardActionTriggerResponse(
@@ -54,9 +53,8 @@ class CardActionListener:
                 )
             ok, toast = self._accept(event)
             logger.info(
-                "card action: mid=%s score=%d accepted=%s operator=%s",
+                "card action: mid=%s accepted=%s operator=%s",
                 event.mid,
-                event.score,
                 ok,
                 event.operator_open_id,
             )
@@ -84,17 +82,16 @@ class CardActionListener:
             yield await self._queue.get()
 
 
-def _parse_rate_event(data: P2CardActionTrigger) -> RateEvent | None:
+def _parse_forward_event(data: P2CardActionTrigger) -> ForwardEvent | None:
     try:
         event = data.event
         if event is None or event.action is None:
             return None
         value = _coerce_action_value(event.action.value)
-        if str(value.get("action") or "") != "rate":
+        if str(value.get("action") or "") != "forward":
             return None
-        score = int(value.get("score") or 0)
         mid = str(value.get("mid") or "")
-        if score not in (1, 2, 3) or not mid:
+        if not mid:
             return None
 
         context = event.context
@@ -105,8 +102,7 @@ def _parse_rate_event(data: P2CardActionTrigger) -> RateEvent | None:
             return None
 
         operator = event.operator
-        return RateEvent(
-            score=score,
+        return ForwardEvent(
             mid=mid,
             uid=str(value.get("uid") or ""),
             message_id=message_id,

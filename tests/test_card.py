@@ -24,8 +24,8 @@ def make_post(**overrides) -> Post:
     return Post(**base)
 
 
-def find_rating_row(card: dict) -> dict:
-    return next(el for el in card["body"]["elements"] if el["tag"] == "column_set")
+def find_forward_button(card: dict) -> dict:
+    return next(el for el in card["body"]["elements"] if el["tag"] == "button")
 
 
 def test_title_is_label_author_in_meta():
@@ -43,33 +43,30 @@ def test_title_is_label_author_in_meta():
     assert "转发 12" not in dumped
     assert "56789" not in dumped and "5.7万" not in dumped
     assert "微博网页版" not in dumped
-    assert not any(el["tag"] == "button" for el in card["body"]["elements"])
 
 
-def test_rating_row_and_mark_rated():
-    from src.card import mark_rated
+def test_forward_button_and_mark_forwarded():
+    from src.card import mark_forwarded
 
     card = build_post_card(make_post(), label="市场数据")
-    row = find_rating_row(card)
-    buttons = [col["elements"][0] for col in row["columns"]]
-    assert [b["text"]["content"] for b in buttons] == ["三分", "两分", "一分"]
-    values = [b["behaviors"][0]["value"] for b in buttons]
-    assert [v["score"] for v in values] == [3, 2, 1]
-    assert all(v["action"] == "rate" and v["mid"] == "m1" for v in values)
+    button = find_forward_button(card)
+    assert button["text"]["content"] == "转发"
+    value = button["behaviors"][0]["value"]
+    assert value == {"action": "forward", "mid": "m1", "uid": "42"}
 
-    rated = mark_rated(card, 3)
-    assert not any(el["tag"] == "column_set" for el in rated["body"]["elements"])
+    forwarded = mark_forwarded(card)
+    assert not any(el["tag"] == "button" for el in forwarded["body"]["elements"])
     assert any(
-        el["tag"] == "markdown" and "已打分：3 分" in el["content"]
-        for el in rated["body"]["elements"]
+        el["tag"] == "markdown" and "已转发" in el["content"]
+        for el in forwarded["body"]["elements"]
     )
-    # mark_rated 不改原卡片（patch 失败还要留原样）
-    assert any(el["tag"] == "column_set" for el in card["body"]["elements"])
+    # mark_forwarded 不改原卡片（patch 失败还要留原样）
+    assert any(el["tag"] == "button" for el in card["body"]["elements"])
 
 
-def test_no_rating_row_when_disabled():
-    card = build_post_card(make_post(), with_rating=False)
-    assert not any(el["tag"] == "column_set" for el in card["body"]["elements"])
+def test_no_forward_button_when_disabled():
+    card = build_post_card(make_post(), with_forward=False)
+    assert not any(el["tag"] == "button" for el in card["body"]["elements"])
 
 
 def test_default_label():

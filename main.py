@@ -14,10 +14,10 @@ from src import log
 from src.bitable import BitableSyncer
 from src.card_store import CardStore
 from src.config import Settings
+from src.forward import ForwardService, ForwardStore
 from src.listener import CardActionListener
 from src.models import Account
 from src.monitor import Monitor
-from src.rating import RatingService, RatingStore
 from src.sender import PostPusher
 from src.state import StateStore
 from src.weibo import WeiboClient
@@ -43,13 +43,13 @@ def build_lark_client(settings: Settings) -> lark.Client:
     )
 
 
-async def _consume_ratings(listener: CardActionListener, service: RatingService) -> None:
+async def _consume_forwards(listener: CardActionListener, service: ForwardService) -> None:
     logger = logging.getLogger(__name__)
     async for event in listener.listen():
         try:
             await service.process(event)
         except Exception:
-            logger.exception("rating process failed: mid=%s", event.mid)
+            logger.exception("forward process failed: mid=%s", event.mid)
 
 
 def _log_task_death(task: asyncio.Task) -> None:
@@ -76,8 +76,8 @@ async def _run(settings: Settings, *, once: bool, dry_run: bool) -> None:
         weibo_client = WeiboClient(settings, http_client)
         await weibo_client.ensure_cookie()
 
-        rating_on = settings.rating_enabled and lark_client is not None
-        card_store = CardStore(settings.card_store_file) if rating_on else None
+        forward_on = settings.forward_enabled and lark_client is not None
+        card_store = CardStore(settings.card_store_file) if forward_on else None
 
         state = StateStore(settings.state_file, settings.seen_mids_per_account)
         pusher = PostPusher(
@@ -86,33 +86,33 @@ async def _run(settings: Settings, *, once: bool, dry_run: bool) -> None:
         monitor = Monitor(settings, weibo_client, state, pusher, accounts)
 
         logger.info(
-            "weibo-monitor started: accounts=%d interval=%ds dry_run=%s rating=%s",
+            "weibo-monitor started: accounts=%d interval=%ds dry_run=%s forward=%s",
             len(accounts),
             settings.poll_interval_seconds,
             dry_run,
-            rating_on,
+            forward_on,
         )
         if once:
             await monitor.run_cycle()
             return
 
-        # 打分侧任务（长连接监听 + 多维表格同步）与轮询并行；
+        # 转发侧任务（长连接监听 + 多维表格归档同步）与轮询并行；
         # 它们意外挂掉只记日志，不拖垮监控主循环
         side_tasks: list[asyncio.Task] = []
-        if rating_on:
-            rating_store = RatingStore(settings.ratings_file)
-            service = RatingService(settings, lark_client, card_store, rating_store)
+        if forward_on:
+            forward_store = ForwardStore(settings.forwarded_file)
+            service = ForwardService(settings, lark_client, card_store, forward_store)
             listener = CardActionListener(settings, service.accept)
             side_tasks.append(
-                asyncio.create_task(_consume_ratings(listener, service), name="rating-listener")
+                asyncio.create_task(_consume_forwards(listener, service), name="forward-listener")
             )
             if settings.bitable_url:
-                syncer = BitableSyncer(settings, lark_client, rating_store)
+                syncer = BitableSyncer(settings, lark_client, forward_store)
                 side_tasks.append(
                     asyncio.create_task(syncer.run_forever(), name="bitable-sync")
                 )
             else:
-                logger.warning("rating enabled but bitable_url not set, scores stay local")
+                logger.warning("forward enabled but bitable_url not set, archive stays local")
         for task in side_tasks:
             task.add_done_callback(_log_task_death)
 
