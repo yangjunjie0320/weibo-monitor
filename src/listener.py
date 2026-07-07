@@ -47,7 +47,8 @@ class CardActionListener:
         def on_card_action(data: P2CardActionTrigger) -> P2CardActionTriggerResponse:
             event = _parse_forward_event(data)
             if event is None:
-                logger.warning("card action ignored: unrecognized payload")
+                raw = getattr(getattr(data.event, "action", None), "value", None)
+                logger.warning("card action ignored: unrecognized payload: value=%r", raw)
                 return P2CardActionTriggerResponse(
                     {"toast": {"type": "warning", "content": "无法识别这个按钮动作"}}
                 )
