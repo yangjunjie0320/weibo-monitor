@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import json
-import logging
-import os
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from .atomic_json import AtomicJsonError, atomic_write_json, load_json_object
 
 
 class CardStore:
@@ -22,16 +19,11 @@ class CardStore:
         self._load()
 
     def _load(self) -> None:
-        if not self._path.exists():
-            return
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.error("card store unreadable, starting fresh: %s: %s", self._path, exc)
-            return
-        cards = data.get("cards")
-        if isinstance(cards, dict):
-            self._cards = cards
+        data = load_json_object(self._path, default={"cards": {}})
+        cards = data.get("cards", {})
+        if not isinstance(cards, dict):
+            raise AtomicJsonError(f"card store cards must be an object: {self._path}")
+        self._cards = cards
 
     def put(self, message_id: str, entry: dict) -> None:
         self._cards.pop(message_id, None)
@@ -45,10 +37,4 @@ class CardStore:
         return self._cards.get(message_id)
 
     def _save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps({"cards": self._cards}, ensure_ascii=False, indent=1),
-            encoding="utf-8",
-        )
-        os.replace(tmp, self._path)
+        atomic_write_json(self._path, {"cards": self._cards})

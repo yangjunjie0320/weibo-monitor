@@ -9,15 +9,24 @@ from typing import Any, Protocol
 
 from .config import Settings
 from .cookie_refresh import ensure_fresh_cookie
-from .models import Account, Post
+from .health import HealthStore, empty_cycle, utc_now
+from .models import Account, Post, PushResult
 from .state import StateStore
-from .weibo import RateLimitedError, WeiboClient, WeiboError, extract_mblogs, parse_post
+from .weibo import (
+    AuthenticationError,
+    RateLimitedError,
+    UpstreamError,
+    WeiboClient,
+    WeiboError,
+    extract_mblogs,
+    parse_post,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class Pusher(Protocol):
-    async def push(self, post: Post) -> bool: ...
+    async def push(self, post: Post) -> bool | PushResult: ...
 
 
 class Monitor:
@@ -28,56 +37,116 @@ class Monitor:
         state: StateStore,
         pusher: Pusher,
         accounts: list[Account],
+        health: HealthStore,
     ) -> None:
         self._settings = settings
         self._client = client
         self._state = state
         self._pusher = pusher
         self._accounts = accounts
+        self._health = health
 
     async def run_forever(self) -> None:
-        rate_limited_streak = 0
+        self._health.mark_starting(len(self._accounts))
         while True:
+            now = utc_now()
+            blocked_until = self._health.blocked_until
+            if blocked_until and blocked_until > now:
+                self._health.write(
+                    status="rate_limited",
+                    next_cycle_at=blocked_until,
+                    blocked_until=blocked_until,
+                    rate_limited_streak=self._health.rate_limited_streak,
+                )
+                await asyncio.sleep((blocked_until - now).total_seconds())
+
             started = time.monotonic()
-            summary: dict[str, int] = {}
+            summary: dict[str, Any]
             try:
                 summary = await self.run_cycle()
-            except Exception:
+            except Exception as exc:
                 logger.exception("cycle failed unexpectedly")
+                summary = empty_cycle(len(self._accounts))
+                summary["failed"] = 1
+                summary["last_error"] = _error("internal", exc)
+                summary["internal_failed"] = True
             elapsed = time.monotonic() - started
             delay = max(self._settings.poll_interval_seconds - elapsed, 30.0)
+
             if summary.get("rate_limited"):
-                rate_limited_streak += 1
-                rest = min(
-                    self._settings.rate_limit_rest_seconds * 2 ** (rate_limited_streak - 1),
+                streak = self._health.rate_limited_streak + 1
+                exponential = min(
+                    self._settings.rate_limit_rest_seconds * 2 ** (streak - 1),
                     self._settings.rate_limit_rest_max_seconds,
                 )
-                delay = max(delay, rest)
+                jitter = self._settings.rate_limit_jitter_ratio
+                rest = exponential * random.uniform(1.0 - jitter, 1.0 + jitter)
+                retry_after = float(summary.get("retry_after_seconds") or 0)
+                delay = max(delay, rest, retry_after)
+                blocked_until = utc_now() + dt.timedelta(seconds=delay)
                 logger.warning(
                     "rate limited %d cycle(s) in a row, resting %.0fs before next cycle",
-                    rate_limited_streak,
+                    streak,
                     delay,
                 )
+                self._health.write(
+                    status="rate_limited",
+                    cycle=_cycle_stats(summary),
+                    next_cycle_at=blocked_until,
+                    blocked_until=blocked_until,
+                    rate_limited_streak=streak,
+                    last_error=summary.get("last_error"),
+                )
+            elif _is_healthy(summary):
+                next_cycle_at = utc_now() + dt.timedelta(seconds=delay)
+                self._health.write(
+                    status="healthy",
+                    cycle=_cycle_stats(summary),
+                    next_cycle_at=next_cycle_at,
+                    blocked_until=None,
+                    rate_limited_streak=0,
+                    last_error=None,
+                    mark_healthy=True,
+                )
             else:
-                rate_limited_streak = 0
+                if summary.get("upstream_aborted") or summary.get("internal_failed"):
+                    delay = max(delay, self._settings.upstream_error_rest_seconds)
+                next_cycle_at = utc_now() + dt.timedelta(seconds=delay)
+                status = "failed" if summary.get("internal_failed") else "degraded"
+                self._health.write(
+                    status=status,
+                    cycle=_cycle_stats(summary),
+                    next_cycle_at=next_cycle_at,
+                    blocked_until=None,
+                    rate_limited_streak=self._health.rate_limited_streak,
+                    last_error=summary.get("last_error"),
+                )
             logger.info("cycle done in %.0fs, next in %.0fs", elapsed, delay)
             await asyncio.sleep(delay)
 
-    async def run_cycle(self) -> dict[str, int]:
+    async def run_cycle(self) -> dict[str, Any]:
         if await ensure_fresh_cookie(self._settings):
             self._client.reload_static_cookie()
         accounts = list(self._accounts)
         random.shuffle(accounts)
-        summary = {"accounts": len(accounts), "new": 0, "pushed": 0, "failed": 0}
+        summary: dict[str, Any] = empty_cycle(len(accounts))
+        consecutive_upstream_failures = 0
+        self._health.write(status="starting", cycle=_cycle_stats(summary), last_error=None)
 
         for index, account in enumerate(accounts):
+            summary["attempted"] += 1
             try:
-                new, pushed = await self._poll_account(account)
+                new, pushed, dropped = await self._poll_account(account)
+                summary["succeeded"] += 1
                 summary["new"] += new
                 summary["pushed"] += pushed
+                summary["dropped"] += dropped
+                consecutive_upstream_failures = 0
             except RateLimitedError as exc:
                 summary["failed"] += 1
-                summary["rate_limited"] = 1
+                summary["rate_limited"] = True
+                summary["retry_after_seconds"] = exc.retry_after_seconds or 0
+                summary["last_error"] = _error("rate_limited", exc)
                 logger.warning(
                     "rate limited at account %s (uid=%s), aborting cycle: %s",
                     account.name,
@@ -86,8 +155,36 @@ class Monitor:
                 )
                 self._state.save()
                 break
+            except AuthenticationError as exc:
+                summary["failed"] += 1
+                summary["upstream_aborted"] = True
+                summary["last_error"] = _error("authentication", exc)
+                logger.error(
+                    "weibo authentication failed at account %s (uid=%s), aborting cycle: %s",
+                    account.name,
+                    account.uid,
+                    exc,
+                )
+                self._state.save()
+                break
+            except UpstreamError as exc:
+                summary["failed"] += 1
+                consecutive_upstream_failures += 1
+                summary["last_error"] = _error("upstream", exc)
+                logger.warning(
+                    "account upstream failure: name=%s uid=%s consecutive=%d error=%s",
+                    account.name,
+                    account.uid,
+                    consecutive_upstream_failures,
+                    exc,
+                )
+                if consecutive_upstream_failures >= self._settings.upstream_failure_threshold:
+                    summary["upstream_aborted"] = True
+                    self._state.save()
+                    break
             except Exception as exc:
                 summary["failed"] += 1
+                summary["last_error"] = _error("account", exc)
                 logger.warning(
                     "account poll failed: name=%s uid=%s error=%s",
                     account.name,
@@ -95,6 +192,11 @@ class Monitor:
                     exc,
                 )
             self._state.save()
+            self._health.write(
+                status="starting",
+                cycle=_cycle_stats(summary),
+                last_error=summary.get("last_error"),
+            )
             if index < len(accounts) - 1:
                 await asyncio.sleep(
                     random.uniform(
@@ -104,15 +206,57 @@ class Monitor:
                 )
 
         logger.info(
-            "cycle summary: accounts=%d new=%d pushed=%d failed=%d",
-            summary["accounts"],
+            "cycle summary: accounts=%d attempted=%d succeeded=%d new=%d pushed=%d "
+            "dropped=%d failed=%d rate_limited=%s",
+            summary["accounts_total"],
+            summary["attempted"],
+            summary["succeeded"],
             summary["new"],
             summary["pushed"],
+            summary["dropped"],
             summary["failed"],
+            summary["rate_limited"],
         )
         return summary
 
-    async def _poll_account(self, account: Account) -> tuple[int, int]:
+    def finish_once(self, summary: dict[str, Any]) -> None:
+        """Persist a terminal status for the `--once` command."""
+
+        if summary.get("rate_limited"):
+            delay = max(
+                self._settings.rate_limit_rest_seconds,
+                float(summary.get("retry_after_seconds") or 0),
+            )
+            blocked_until = utc_now() + dt.timedelta(seconds=delay)
+            self._health.write(
+                status="rate_limited",
+                cycle=_cycle_stats(summary),
+                next_cycle_at=blocked_until,
+                blocked_until=blocked_until,
+                rate_limited_streak=self._health.rate_limited_streak + 1,
+                last_error=summary.get("last_error"),
+            )
+        elif _is_healthy(summary):
+            self._health.write(
+                status="healthy",
+                cycle=_cycle_stats(summary),
+                next_cycle_at=None,
+                blocked_until=None,
+                rate_limited_streak=0,
+                last_error=None,
+                mark_healthy=True,
+            )
+        else:
+            self._health.write(
+                status="degraded",
+                cycle=_cycle_stats(summary),
+                next_cycle_at=None,
+                blocked_until=None,
+                rate_limited_streak=self._health.rate_limited_streak,
+                last_error=summary.get("last_error"),
+            )
+
+    async def _poll_account(self, account: Account) -> tuple[int, int, int]:
         uid = account.uid
         now_iso = dt.datetime.now(dt.UTC).isoformat(timespec="seconds")
         seeded = self._state.has_account(uid)
@@ -123,7 +267,7 @@ class Monitor:
             if seeded:
                 self._state.mark_seen(uid, [], last_poll=now_iso)
             logger.info("no posts parsed: name=%s uid=%s", account.name, uid)
-            return 0, 0
+            return 0, 0, 0
 
         if not seeded:
             # 首次见到该账号：全部落 state，不推送，防冷启动刷屏
@@ -131,7 +275,7 @@ class Monitor:
             logger.info(
                 "account seeded: name=%s uid=%s mids=%d", account.name, uid, len(entries)
             )
-            return 0, 0
+            return 0, 0, 0
 
         max_age = dt.timedelta(hours=self._settings.max_post_age_hours)
         now = dt.datetime.now(dt.UTC)
@@ -150,6 +294,7 @@ class Monitor:
             self._state.mark_seen(uid, stale_mids)
 
         pushed = 0
+        dropped = 0
         for mblog, post in sorted(new_posts, key=lambda item: item[1].created_at):
             if mblog.get("isLongText"):
                 extend = await self._client.fetch_extend(post.mid)
@@ -157,8 +302,15 @@ class Monitor:
                 if refreshed:
                     refreshed.is_pinned = post.is_pinned
                     post = refreshed
-            if await self._pusher.push(post):
-                pushed += 1
+            raw_result = await self._pusher.push(post)
+            result = (
+                raw_result
+                if isinstance(raw_result, PushResult)
+                else PushResult(handled=bool(raw_result), pushed=bool(raw_result))
+            )
+            if result.handled:
+                pushed += int(result.pushed)
+                dropped += int(result.dropped)
                 self._state.mark_seen(uid, [post.mid])
             else:
                 logger.error(
@@ -174,7 +326,7 @@ class Monitor:
                 len(new_posts),
                 pushed,
             )
-        return len(new_posts), pushed
+        return len(new_posts), pushed, dropped
 
     async def _fetch_entries(
         self, account: Account, max_pages: int | None = None
@@ -190,6 +342,8 @@ class Monitor:
         for page in range(1, limit + 1):
             try:
                 data = await self._client.timeline_page(uid, page)
+            except RateLimitedError:
+                raise
             except WeiboError:
                 if entries:
                     break  # 已有部分数据，按部分结果处理
@@ -220,3 +374,30 @@ class Monitor:
             )
 
         return entries
+
+
+def _error(kind: str, exc: BaseException) -> dict[str, str]:
+    message = " ".join(str(exc).split())[:240]
+    return {"kind": kind, "message": message or type(exc).__name__}
+
+
+def _cycle_stats(summary: dict[str, Any]) -> dict[str, int | bool]:
+    return {
+        "accounts_total": int(summary.get("accounts_total", 0)),
+        "attempted": int(summary.get("attempted", 0)),
+        "succeeded": int(summary.get("succeeded", 0)),
+        "failed": int(summary.get("failed", 0)),
+        "new": int(summary.get("new", 0)),
+        "pushed": int(summary.get("pushed", 0)),
+        "dropped": int(summary.get("dropped", 0)),
+        "rate_limited": bool(summary.get("rate_limited", False)),
+    }
+
+
+def _is_healthy(summary: dict[str, Any]) -> bool:
+    return bool(
+        summary.get("attempted") == summary.get("accounts_total")
+        and summary.get("succeeded") == summary.get("accounts_total")
+        and not summary.get("failed")
+        and not summary.get("rate_limited")
+    )

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import email.utils
 import html
 import json
 import logging
@@ -57,8 +58,27 @@ class WeiboError(Exception):
     pass
 
 
+class AuthenticationError(WeiboError):
+    """微博登录态失效；调用方最多刷新一次 Cookie。"""
+
+
+class UpstreamError(WeiboError):
+    """微博上游临时故障，可做有限次数重试。"""
+
+
 class RateLimitedError(WeiboError):
     """captcha/visitor 挑战：IP 级限流，重试无益，调用方应熔断休息。"""
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        status_code: int | None = None,
+        retry_after_seconds: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.retry_after_seconds = retry_after_seconds
 
 
 def _load_static_cookie(settings: Settings) -> str:
@@ -110,45 +130,110 @@ class WeiboClient:
 
     async def request_json(self, url: str) -> dict[str, Any]:
         last_error: Exception | None = None
-        for attempt in range(self._settings.request_retries + 1):
+        auth_refreshed = False
+        upstream_attempt = 0
+        while True:
             try:
                 return await self._request_json_once(url)
-            except RateLimitedError as exc:
-                if self._static:
-                    raise  # 真实 cookie 被挑战，重试无益
+            except RateLimitedError:
+                raise  # IP/会话级封控，重试与换游客身份都会加重封控
+            except AuthenticationError:
+                if auth_refreshed or not await self._refresh_auth_cookie():
+                    raise
+                auth_refreshed = True
+            except (httpx.HTTPError, UpstreamError) as exc:
                 last_error = exc
-                if attempt < self._settings.request_retries:
-                    await asyncio.sleep(0.8 * (attempt + 1))
-            except (httpx.HTTPError, WeiboError, json.JSONDecodeError) as exc:
-                last_error = exc
-                if attempt < self._settings.request_retries:
-                    await asyncio.sleep(0.8 * (attempt + 1))
-        if isinstance(last_error, RateLimitedError):
-            raise last_error
-        raise WeiboError(f"request failed: {url}: {last_error}") from last_error
+                if upstream_attempt >= self._settings.request_retries:
+                    path = urllib.parse.urlsplit(url).path
+                    raise UpstreamError(
+                        f"request failed: endpoint={path} error={last_error}"
+                    ) from last_error
+                upstream_attempt += 1
+                await asyncio.sleep(0.8 * upstream_attempt)
+
+    async def _refresh_auth_cookie(self) -> bool:
+        if not self._static:
+            try:
+                await self.refresh_visitor_cookie()
+                return True
+            except Exception as exc:
+                logger.warning("visitor auth refresh failed: %s", exc)
+                return False
+
+        from .cookie_refresh import refresh_weibo_cookie
+
+        if not await refresh_weibo_cookie(self._settings):
+            return False
+        self.reload_static_cookie()
+        return bool(self._static)
 
     async def _request_json_once(self, url: str) -> dict[str, Any]:
         headers = self._headers()
         if self._cookie:
             headers["Cookie"] = self._cookie
-        resp = await self._http.get(url, headers=headers, timeout=self._settings.request_timeout)
+        try:
+            resp = await self._http.get(
+                url, headers=headers, timeout=self._settings.request_timeout
+            )
+        except httpx.HTTPError as exc:
+            raise UpstreamError(f"transport error: {type(exc).__name__}") from exc
+
+        status = resp.status_code
+        content_type = resp.headers.get("content-type", "")
+        size = len(resp.content)
+        if status == 401:
+            raise AuthenticationError("HTTP 401 authentication rejected")
+        if status in {403, 418, 429, 432}:
+            retry_after = _parse_retry_after(resp.headers.get("retry-after"))
+            logger.warning(
+                "weibo rate limited: status=%d content_type=%s bytes=%d retry_after=%s",
+                status,
+                content_type or "-",
+                size,
+                retry_after,
+            )
+            raise RateLimitedError(
+                f"HTTP {status}",
+                status_code=status,
+                retry_after_seconds=retry_after,
+            )
+        if status >= 500:
+            raise UpstreamError(
+                f"upstream HTTP {status}: content_type={content_type or '-'} bytes={size}"
+            )
+        if status >= 400:
+            raise WeiboError(
+                f"request rejected: HTTP {status} content_type={content_type or '-'} bytes={size}"
+            )
+        if not resp.content:
+            raise UpstreamError(
+                f"empty response: HTTP {status} content_type={content_type or '-'}"
+            )
+
         text = resp.text
         try:
             parsed = json.loads(text)
-        except json.JSONDecodeError:
+        except json.JSONDecodeError as exc:
             if "Sina Visitor System" in text:
-                if not self._static:
-                    await self.refresh_visitor_cookie()
-                    await asyncio.sleep(1.0)
-                raise RateLimitedError("visitor challenge") from None
-            raise
+                raise RateLimitedError("visitor challenge", status_code=status) from None
+            raise UpstreamError(
+                f"invalid JSON: HTTP {status} content_type={content_type or '-'} bytes={size}"
+            ) from exc
         if not isinstance(parsed, dict):
-            raise WeiboError(f"unexpected response shape: {text[:200]}")
-        if parsed.get("ok") == -100 and "captcha" in str(parsed.get("url", "")):
-            if not self._static:
-                await self.refresh_visitor_cookie()
-                await asyncio.sleep(2.0)
-            raise RateLimitedError("captcha challenge")
+            raise UpstreamError("unexpected JSON shape: expected object")
+
+        ok = parsed.get("ok")
+        challenge = " ".join(
+            str(parsed.get(key, "")) for key in ("url", "msg", "message", "errmsg")
+        ).lower()
+        if ok == -100 and ("captcha" in challenge or "visitor" in challenge):
+            raise RateLimitedError("captcha challenge", status_code=status)
+        if ok != 1:
+            if "captcha" in challenge or "visitor" in challenge:
+                raise RateLimitedError("challenge response", status_code=status)
+            if "login" in challenge or "登录" in challenge:
+                raise AuthenticationError("API reports authentication required")
+            raise UpstreamError(f"unexpected API status: ok={ok!r}")
         return parsed
 
     async def refresh_visitor_cookie(self) -> None:
@@ -169,16 +254,51 @@ class WeiboClient:
             headers=self._headers(),
             timeout=self._settings.request_timeout,
         )
+        status = resp.status_code
+        content_type = resp.headers.get("content-type", "")
+        size = len(resp.content)
+        if status in {403, 418, 429, 432}:
+            raise RateLimitedError(
+                f"visitor endpoint HTTP {status}",
+                status_code=status,
+                retry_after_seconds=_parse_retry_after(resp.headers.get("retry-after")),
+            )
+        if status >= 500:
+            raise UpstreamError(
+                f"visitor endpoint HTTP {status}: "
+                f"content_type={content_type or '-'} bytes={size}"
+            )
+        if status >= 400:
+            raise WeiboError(
+                f"visitor endpoint rejected: HTTP {status} "
+                f"content_type={content_type or '-'} bytes={size}"
+            )
         match = re.search(r"visitor_gray_callback\((\{.*\})\);?", resp.text)
         if not match:
-            raise WeiboError(f"could not parse visitor response: {resp.text[:200]}")
-        data = json.loads(match.group(1))
+            raise UpstreamError(
+                f"invalid visitor response: HTTP {status} "
+                f"content_type={content_type or '-'} bytes={size}"
+            )
+        try:
+            data = json.loads(match.group(1))
+        except json.JSONDecodeError as exc:
+            raise UpstreamError(
+                f"invalid visitor JSON: HTTP {status} "
+                f"content_type={content_type or '-'} bytes={size}"
+            ) from exc
+        if not isinstance(data, dict):
+            raise UpstreamError("unexpected visitor JSON shape: expected object")
         if data.get("retcode") != 20000000:
-            raise WeiboError(f"visitor cookie failed: {data}")
-        sub = data["data"]["sub"]
-        subp = data["data"]["subp"]
+            raise UpstreamError(
+                f"visitor cookie rejected: HTTP {status} retcode={data.get('retcode')!r}"
+            )
+        try:
+            sub = data["data"]["sub"]
+            subp = data["data"]["subp"]
+        except (KeyError, TypeError) as exc:
+            raise UpstreamError("visitor response missing cookie fields") from exc
         self._cookie = f"SUB={sub}; SUBP={subp}"
-        logger.info("visitor cookie refreshed: tid=%s", data["data"].get("tid"))
+        logger.info("visitor cookie refreshed")
         await self._warmup()
 
     async def _warmup(self) -> None:
@@ -206,12 +326,30 @@ class WeiboClient:
             data = await self.request_json(
                 f"https://m.weibo.cn/statuses/extend?id={urllib.parse.quote(mid)}"
             )
+        except RateLimitedError:
+            raise
         except WeiboError as exc:
             logger.warning("extend fetch failed mid=%s: %s", mid, exc)
             return {}
         if data.get("ok") == 1 and isinstance(data.get("data"), dict):
             return data["data"]
         return {}
+
+
+def _parse_retry_after(value: str | None) -> float | None:
+    if not value:
+        return None
+    try:
+        return max(float(value), 0.0)
+    except ValueError:
+        pass
+    try:
+        target = email.utils.parsedate_to_datetime(value)
+        if target.tzinfo is None:
+            target = target.replace(tzinfo=dt.UTC)
+        return max((target - dt.datetime.now(dt.UTC)).total_seconds(), 0.0)
+    except (TypeError, ValueError, OverflowError):
+        return None
 
 
 # ---------- 纯解析函数（离线可测） ----------

@@ -12,12 +12,16 @@ from lark_oapi.api.bitable.v1 import (
     AppTableRecord,
     BatchCreateAppTableRecordRequest,
     BatchCreateAppTableRecordRequestBody,
+    Condition,
     CreateAppTableFieldRequest,
     CreateAppTableRequest,
     CreateAppTableRequestBody,
+    FilterInfo,
     ListAppTableFieldRequest,
     ListAppTableRequest,
     ReqTable,
+    SearchAppTableRecordRequest,
+    SearchAppTableRecordRequestBody,
 )
 from lark_oapi.api.wiki.v2 import GetNodeSpaceRequest
 
@@ -25,6 +29,8 @@ from .config import Settings
 from .forward import ForwardStore
 
 logger = logging.getLogger(__name__)
+
+_BATCH_SIZE = 100
 
 # 飞书多维表格字段类型码：1 多行文本、2 数字、5 日期、15 超链接
 _FIELDS = [
@@ -89,13 +95,63 @@ class BitableSyncer:
     # ---- 以下均为阻塞调用，跑在线程池 ----
 
     def _sync_once(self) -> int:
-        pending = self._store.pending()
+        pending = self._store.pending_archive()
         if not pending:
             return 0
-        self._ensure_table()
+        try:
+            self._ensure_table()
+        except Exception as exc:
+            self._store.mark_archive_failed(
+                [mid for mid, _ in pending],
+                exc,
+                retry_after_seconds=self._settings.bitable_sync_interval_seconds,
+            )
+            raise
+
+        to_create: list[tuple[str, dict]] = []
+        for index, (mid, rec) in enumerate(pending):
+            try:
+                exists = self._remote_has_mid(mid)
+            except Exception as exc:
+                # Defer this and all records not yet checked. Previously checked items
+                # remain safe: existing ones were marked synced and missing ones have
+                # not been written yet.
+                deferred = [pending_mid for pending_mid, _ in pending[index:]]
+                self._store.mark_archive_failed(
+                    deferred,
+                    exc,
+                    retry_after_seconds=self._settings.bitable_sync_interval_seconds,
+                )
+                raise
+            if exists:
+                self._store.mark_archive_synced([mid])
+                logger.info("bitable record already exists: mid=%s", mid)
+            else:
+                to_create.append((mid, rec))
+
+        created = 0
+        for start in range(0, len(to_create), _BATCH_SIZE):
+            batch = to_create[start : start + _BATCH_SIZE]
+            try:
+                self._batch_create(batch)
+            except Exception as exc:
+                # Only this and later, not-yet-attempted batches need another round.
+                deferred = [mid for mid, _ in to_create[start:]]
+                self._store.mark_archive_failed(
+                    deferred,
+                    exc,
+                    retry_after_seconds=self._settings.bitable_sync_interval_seconds,
+                )
+                raise
+            mids = [mid for mid, _ in batch]
+            self._store.mark_archive_synced(mids)
+            created += len(batch)
+        return created
+
+    def _batch_create(self, batch: list[tuple[str, dict]]) -> None:
         records = [
             AppTableRecord.builder().fields(self._to_fields(mid, rec)).build()
-            for mid, rec in pending
+            for mid, rec in batch
         ]
         request = (
             BatchCreateAppTableRecordRequest.builder()
@@ -111,8 +167,42 @@ class BitableSyncer:
             raise BitableError(
                 f"batch create failed: code={response.code} msg={response.msg}"
             )
-        self._store.mark_synced([mid for mid, _ in pending])
-        return len(pending)
+        created_records = response.data.records if response.data else None
+        if created_records is None or len(created_records) != len(batch):
+            # Treat an ambiguous success as retryable. The next run's mid search will
+            # discover any records the server actually committed and avoid duplicates.
+            actual = 0 if created_records is None else len(created_records)
+            raise BitableError(
+                f"batch create returned {actual} record(s), expected {len(batch)}"
+            )
+
+    def _remote_has_mid(self, mid: str) -> bool:
+        condition = (
+            Condition.builder().field_name("mid").operator("is").value([mid]).build()
+        )
+        filter_info = (
+            FilterInfo.builder().conjunction("and").conditions([condition]).build()
+        )
+        body = (
+            SearchAppTableRecordRequestBody.builder()
+            .field_names(["mid"])
+            .filter(filter_info)
+            .build()
+        )
+        request = (
+            SearchAppTableRecordRequest.builder()
+            .app_token(self._app_token)
+            .table_id(self._table_id)
+            .page_size(1)
+            .request_body(body)
+            .build()
+        )
+        response = self._client.bitable.v1.app_table_record.search(request)
+        if not response.success():
+            raise BitableError(
+                f"record search failed: mid={mid} code={response.code} msg={response.msg}"
+            )
+        return bool(response.data and response.data.items)
 
     def _to_fields(self, mid: str, rec: dict) -> dict:
         fields: dict[str, object] = {
@@ -144,21 +234,10 @@ class BitableSyncer:
                 logger.info("bitable table found: %s (%s)", name, table_id)
                 break
         else:
-            try:
-                self._table_id = self._create_table(name)
-                logger.info("bitable table created: %s (%s)", name, self._table_id)
-            except BitableError as e:
-                # wiki 承载的表格「可编辑」权限不允许建数据表（需可管理），
-                # 回落到第一张现有表，缺的字段补上
-                if not existing:
-                    raise
-                self._table_id = existing[0][0]
-                logger.warning(
-                    "cannot create table (%s), falling back to existing table %s (%s)",
-                    e,
-                    existing[0][1],
-                    self._table_id,
-                )
+            # Never fall back to the first unrelated table: that can silently put
+            # archive data into a user-owned dataset with a different meaning.
+            self._table_id = self._create_table(name)
+            logger.info("bitable table created: %s (%s)", name, self._table_id)
         self._ensure_fields()
 
     def _ensure_fields(self) -> None:
@@ -266,4 +345,7 @@ class BitableSyncer:
             raise BitableError(
                 f"table create failed: code={response.code} msg={response.msg}"
             )
-        return response.data.table_id or ""
+        table_id = response.data.table_id if response.data else ""
+        if not table_id:
+            raise BitableError("table create succeeded without a table_id")
+        return table_id

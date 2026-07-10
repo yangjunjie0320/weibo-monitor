@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -13,7 +14,6 @@ logger = logging.getLogger(__name__)
 _LAUNCH_ARGS = [
     "--disable-dev-shm-usage",
     "--disable-gpu",
-    "--no-sandbox",
     "--disk-cache-size=0",
 ]
 
@@ -65,17 +65,21 @@ async def persistent_context(
         ) from exc
 
     path = Path(profile_dir)
-    path.mkdir(parents=True, exist_ok=True)
-    _clear_singleton_locks(path)
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(path, 0o700)
 
-    async with _lock_for(path), async_playwright() as playwright:
-        context = await playwright.chromium.launch_persistent_context(
-            user_data_dir=str(path),
-            headless=headless,
-            args=_LAUNCH_ARGS,
-            timeout=timeout_ms,
-        )
-        try:
-            yield context
-        finally:
-            await context.close()
+    # 清理 Chromium 锁文件也必须处于同一把进程内锁内，否则第二个协程可能
+    # 删掉第一个正在使用的 profile 锁。
+    async with _lock_for(path):
+        _clear_singleton_locks(path)
+        async with async_playwright() as playwright:
+            context = await playwright.chromium.launch_persistent_context(
+                user_data_dir=str(path),
+                headless=headless,
+                args=_LAUNCH_ARGS,
+                timeout=timeout_ms,
+            )
+            try:
+                yield context
+            finally:
+                await context.close()

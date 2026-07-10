@@ -14,7 +14,7 @@ from .card_store import CardStore
 from .classifier import classify_post
 from .config import Settings
 from .image_uploader import upload_image
-from .models import Post
+from .models import Post, PushResult
 
 logger = logging.getLogger(__name__)
 
@@ -86,7 +86,7 @@ class PostPusher:
         self._card_store = card_store
         self._dry_run = dry_run
 
-    async def push(self, post: Post) -> bool:
+    async def push(self, post: Post) -> PushResult:
         result = await classify_post(post, self._settings, self._http_client)
         if result.should_drop(self._settings):
             # 视为已处理（返回 True 落 state），不再重试
@@ -98,12 +98,15 @@ class PostPusher:
                 result.china,
                 post.url,
             )
-            return True
+            return PushResult.discarded()
 
         image_key = None
         if post.image_urls and not self._dry_run:
             image_key = await upload_image(
-                post.image_urls[0], self._lark_client, self._http_client
+                post.image_urls[0],
+                self._lark_client,
+                self._http_client,
+                max_bytes=self._settings.image_max_bytes,
             )
         card = build_post_card(
             post, image_key, result.label, with_forward=self._settings.forward_enabled
@@ -118,11 +121,11 @@ class PostPusher:
                 post.url,
                 post.text_plain[:80].replace("\n", " "),
             )
-            return True
+            return PushResult.processed()
 
         message_id = await self._sender.send(json.dumps(card, ensure_ascii=False))
         if message_id is None:
-            return False
+            return PushResult.failed()
         logger.info(
             "post pushed: name=%s mid=%s url=%s", post.screen_name, post.mid, post.url
         )
@@ -140,4 +143,4 @@ class PostPusher:
                     "post_created_at": post.created_at.isoformat(timespec="seconds"),
                 },
             )
-        return True
+        return PushResult.sent()

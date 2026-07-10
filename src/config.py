@@ -1,10 +1,15 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
 
 import yaml
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import Field, model_validator
+from pydantic_settings import (
+    BaseSettings,
+    PydanticBaseSettingsSource,
+    SettingsConfigDict,
+    YamlConfigSettingsSource,
+)
 
 
 class Settings(BaseSettings):
@@ -12,7 +17,9 @@ class Settings(BaseSettings):
         env_prefix="WEIBO_MONITOR_",
         env_file=".env",
         env_file_encoding="utf-8",
-        extra="ignore",
+        extra="forbid",
+        yaml_file=None,
+        yaml_file_encoding="utf-8",
     )
 
     app_id: str = ""
@@ -21,14 +28,15 @@ class Settings(BaseSettings):
 
     accounts_file: str = "accounts.yaml"
     state_file: str = "state/seen.json"
+    health_file: str = "state/health.json"
 
     # 卡片转发按钮：点击转发到目标群，回调走长连接（需在开放平台把回调订阅
     # 方式设为长连接）。转发记录先落本地，再周期同步到多维表格归档。
-    forward_enabled: bool = True
-    forward_chat_id: str = ""       # 转发目标群（--list-chats 查）
-    bitable_url: str = ""           # 归档多维表格分享链接（机器人需可编辑）
+    forward_enabled: bool = False
+    forward_chat_id: str = ""  # 转发目标群（--list-chats 查）
+    bitable_url: str = ""  # 归档多维表格分享链接（机器人需可编辑）
     bitable_table_name: str = "转发归档"
-    bitable_sync_interval_seconds: int = 600
+    bitable_sync_interval_seconds: int = Field(default=600, gt=0)
     card_store_file: str = "state/cards.json"
     forwarded_file: str = "state/forwarded.json"
 
@@ -42,43 +50,93 @@ class Settings(BaseSettings):
     cookie_refresh_enabled: bool = True
     browser_profile_dir: str = "browser-data/weibo"
     browser_headless: bool = True
-    browser_timeout: float = 60.0
-    cookie_stale_seconds: int = 86400 * 3      # 文件超过 3 天算过期
-    cookie_refresh_min_interval: int = 3600    # 进程内刷新节流
+    browser_timeout: float = Field(default=60.0, gt=0)
+    cookie_stale_seconds: int = Field(default=86400 * 3, gt=0)
+    cookie_refresh_min_interval: int = Field(default=3600, ge=0)
 
-    # 触发限流（captcha 挑战）后本轮熔断，至少休息这么久再开下一轮；
-    # 连续限流时指数退避（900 → 1800 → 3600 → ...），封顶 rate_limit_rest_max_seconds
-    rate_limit_rest_seconds: int = 900
-    rate_limit_rest_max_seconds: int = 14400
+    # 限流使用长退避并持久化；普通上游故障连续出现时也提前结束本轮。
+    rate_limit_rest_seconds: int = Field(default=1800, gt=0)
+    rate_limit_rest_max_seconds: int = Field(default=43200, gt=0)
+    rate_limit_jitter_ratio: float = Field(default=0.2, ge=0, le=1)
+    upstream_failure_threshold: int = Field(default=3, gt=0)
+    upstream_error_rest_seconds: int = Field(default=300, gt=0)
 
-    poll_interval_seconds: int = 600
-    max_post_age_hours: int = 24
-    max_pages_per_account: int = 3
-    seen_mids_per_account: int = 200
+    poll_interval_seconds: int = Field(default=600, gt=0)
+    max_post_age_hours: int = Field(default=24, gt=0)
+    max_pages_per_account: int = Field(default=3, gt=0)
+    seen_mids_per_account: int = Field(default=200, gt=0)
 
-    account_delay_min_seconds: float = 8.0
-    account_delay_max_seconds: float = 15.0
-    request_timeout: float = 20.0
-    request_retries: int = 3
-    send_retry_attempts: int = 3
+    account_delay_min_seconds: float = Field(default=8.0, ge=0)
+    account_delay_max_seconds: float = Field(default=15.0, ge=0)
+    request_timeout: float = Field(default=20.0, gt=0)
+    request_retries: int = Field(default=3, ge=0)
+    send_retry_attempts: int = Field(default=3, gt=0)
+    image_max_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
 
     # DeepSeek 内容分类（车圈热点/产品发布/谍照申报/市场数据/资本市场/
-    # 出海信息/政策监管/行业观察/广告/汽车无关）。广告折叠展示；
-    # 汽车无关和非中国内容直接不推送（可关）。
+    # 出海信息/政策监管/行业观察/广告/汽车无关）。广告、汽车无关和非中国内容
+    # 默认不推送（分别可关闭）。
     classification_enabled: bool = True
-    drop_offtopic: bool = True    # 汽车无关的帖子不推送
-    drop_ads: bool = True         # 广告不推送
-    drop_non_china: bool = True   # 与中国汽车行业无关的内容不推送
+    drop_offtopic: bool = True
+    drop_ads: bool = True
+    drop_non_china: bool = True
     deepseek_api_key: str = ""
     deepseek_base_url: str = "https://api.deepseek.com"
     deepseek_model: str = "deepseek-chat"
-    classify_timeout: float = 15.0
+    classify_timeout: float = Field(default=15.0, gt=0)
 
     log_level: str = "INFO"
     log_dir: str = "logs"
+    console_log: bool = True
+
+    @classmethod
+    def settings_customise_sources(
+        cls,
+        settings_cls: type[BaseSettings],
+        init_settings: PydanticBaseSettingsSource,
+        env_settings: PydanticBaseSettingsSource,
+        dotenv_settings: PydanticBaseSettingsSource,
+        file_secret_settings: PydanticBaseSettingsSource,
+    ) -> tuple[PydanticBaseSettingsSource, ...]:
+        """Explicit values > environment > .env > YAML > defaults."""
+        yaml_settings = YamlConfigSettingsSource(settings_cls)
+        return (
+            init_settings,
+            env_settings,
+            dotenv_settings,
+            yaml_settings,
+            file_secret_settings,
+        )
+
+    @model_validator(mode="after")
+    def validate_ranges_and_dependencies(self) -> Settings:
+        if self.account_delay_min_seconds > self.account_delay_max_seconds:
+            raise ValueError(
+                "account_delay_min_seconds must not exceed "
+                "account_delay_max_seconds"
+            )
+        if self.rate_limit_rest_seconds > self.rate_limit_rest_max_seconds:
+            raise ValueError(
+                "rate_limit_rest_max_seconds must be at least "
+                "rate_limit_rest_seconds"
+            )
+        if self.forward_enabled and not self.forward_chat_id.strip():
+            raise ValueError("forward_chat_id is required when forward_enabled is true")
+        return self
 
     @classmethod
     def from_yaml(cls, path: str | Path) -> Settings:
-        with open(path, encoding="utf-8") as f:
-            data: dict[str, Any] = yaml.safe_load(f) or {}
-        return cls(**data)
+        yaml_path = Path(path)
+        try:
+            raw = yaml.safe_load(yaml_path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLError) as exc:
+            raise ValueError(f"cannot read YAML config {yaml_path}: {exc}") from exc
+        if raw is not None and not isinstance(raw, dict):
+            raise ValueError(f"YAML config root must be an object: {yaml_path}")
+
+        class YamlSettings(cls):
+            model_config = SettingsConfigDict(
+                **{**cls.model_config, "yaml_file": yaml_path}
+            )
+
+        return YamlSettings()

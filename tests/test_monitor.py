@@ -1,6 +1,7 @@
 import datetime as dt
 
 from src.config import Settings
+from src.health import HealthStore
 from src.models import Account, Post
 from src.monitor import Monitor
 from src.state import StateStore
@@ -60,10 +61,12 @@ def make_monitor(tmp_path, pages, *, state=None, pusher=None):
         account_delay_max_seconds=0,
         state_file=str(tmp_path / "seen.json"),
         cookie_refresh_enabled=False,
+        forward_enabled=False,
     )
     state = state or StateStore(settings.state_file)
     pusher = pusher or FakePusher()
-    monitor = Monitor(settings, FakeWeibo(pages), state, pusher, [ACCOUNT])
+    health = HealthStore(tmp_path / "health.json")
+    monitor = Monitor(settings, FakeWeibo(pages), state, pusher, [ACCOUNT], health)
     return monitor, state, pusher
 
 
@@ -163,11 +166,19 @@ async def test_rate_limited_aborts_cycle(tmp_path):
         account_delay_max_seconds=0,
         state_file=str(tmp_path / "seen.json"),
         cookie_refresh_enabled=False,
+        forward_enabled=False,
     )
     state = StateStore(settings.state_file)
     pusher = FakePusher()
     accounts = [ACCOUNT, Account(name="第二个", uid="43")]
-    monitor = Monitor(settings, LimitedWeibo({}), state, pusher, accounts)
+    monitor = Monitor(
+        settings,
+        LimitedWeibo({}),
+        state,
+        pusher,
+        accounts,
+        HealthStore(tmp_path / "health.json"),
+    )
 
     summary = await monitor.run_cycle()
     # 熔断：第一个账号触发限流后本轮中止，不再打第二个账号
@@ -187,3 +198,71 @@ async def test_new_pinned_post_within_age_is_pushed(tmp_path):
 
     await monitor.run_cycle()
     assert [p.mid for p in pusher.pushed] == ["pin"]
+
+
+async def test_rate_limit_on_second_page_is_not_swallowed(tmp_path):
+    from src.weibo import RateLimitedError
+
+    class PageTwoLimited(FakeWeibo):
+        async def timeline_page(self, uid: str, page: int) -> dict:
+            if page == 2:
+                raise RateLimitedError("HTTP 432", status_code=432)
+            return self.pages.get(page, timeline())
+
+    settings = Settings(
+        account_delay_min_seconds=0,
+        account_delay_max_seconds=0,
+        state_file=str(tmp_path / "seen.json"),
+        cookie_refresh_enabled=False,
+        forward_enabled=False,
+    )
+    state = StateStore(settings.state_file)
+    state.mark_seen("42", ["known"])
+    pusher = FakePusher()
+    client = PageTwoLimited({1: timeline(make_card("new", dt.timedelta(minutes=5)))})
+    monitor = Monitor(
+        settings,
+        client,
+        state,
+        pusher,
+        [ACCOUNT],
+        HealthStore(tmp_path / "health.json"),
+    )
+
+    summary = await monitor.run_cycle()
+
+    assert summary["rate_limited"] is True
+    assert summary["attempted"] == 1
+    assert pusher.pushed == []
+
+
+async def test_three_consecutive_upstream_failures_abort_cycle(tmp_path):
+    from src.weibo import UpstreamError
+
+    class BrokenWeibo(FakeWeibo):
+        async def timeline_page(self, uid: str, page: int) -> dict:
+            raise UpstreamError("empty response")
+
+    settings = Settings(
+        account_delay_min_seconds=0,
+        account_delay_max_seconds=0,
+        state_file=str(tmp_path / "seen.json"),
+        cookie_refresh_enabled=False,
+        upstream_failure_threshold=3,
+        forward_enabled=False,
+    )
+    accounts = [Account(name=f"账号{i}", uid=str(i)) for i in range(5)]
+    monitor = Monitor(
+        settings,
+        BrokenWeibo({}),
+        StateStore(settings.state_file),
+        FakePusher(),
+        accounts,
+        HealthStore(tmp_path / "health.json"),
+    )
+
+    summary = await monitor.run_cycle()
+
+    assert summary["upstream_aborted"] is True
+    assert summary["attempted"] == 3
+    assert summary["failed"] == 3

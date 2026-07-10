@@ -14,6 +14,7 @@ chat_id: ""
 # 监控账号清单与状态文件
 accounts_file: "accounts.yaml"
 state_file: "state/seen.json"
+health_file: "state/health.json"
 
 # 轮询节奏
 poll_interval_seconds: 600      # 每轮间隔（秒）
@@ -40,29 +41,36 @@ account_delay_max_seconds: 15.0
 request_timeout: 20.0
 request_retries: 3
 
-# 触发限流（captcha）后本轮熔断，至少休息这么久再开下一轮；
-# 连续限流按 900 → 1800 → 3600 指数退避，封顶 rate_limit_rest_max_seconds
-rate_limit_rest_seconds: 900
-rate_limit_rest_max_seconds: 14400
+# 触发限流后立即停止本轮；连续限流按 30m → 1h → 2h 指数退避，
+# 封顶 12h，并加入 ±20% 抖动。普通上游故障连续三次也提前停止本轮。
+rate_limit_rest_seconds: 1800
+rate_limit_rest_max_seconds: 43200
+rate_limit_jitter_ratio: 0.2
+upstream_failure_threshold: 3
+upstream_error_rest_seconds: 300
 
 # 飞书发送重试次数
 send_retry_attempts: 3
+image_max_bytes: 10485760       # 下载首图最大 10 MiB
 
 # 卡片转发按钮：点击后原卡片变"已转发"，消息转发到目标群，并归档进多维表格。
 # 依赖开放平台配置：事件与回调 → 回调订阅方式改为"使用长连接接收回调"；
 # 多维表格需追加 bitable:app 权限（wiki 链接还要 wiki:wiki:readonly），
 # 且机器人是表格的可编辑协作者。
-forward_enabled: true
+forward_enabled: false          # 设为 true 时 forward_chat_id 必填
 forward_chat_id: ""             # 转发目标群（--list-chats 查）
 bitable_url: ""                 # 归档多维表格分享链接（/base/ 或 /wiki/ 链接均可）
-bitable_table_name: "转发归档"   # 数据表名；建表权限不足时自动回落到现有表并补字段
+bitable_table_name: "转发归档"   # 数据表名；不存在则创建，失败时保留本地待归档
 bitable_sync_interval_seconds: 600  # 归档同步到多维表格的周期（秒）
 card_store_file: "state/cards.json"
 forwarded_file: "state/forwarded.json"
 
-# DeepSeek 内容分类：每条新帖打标签（观点/内容/广告/汽车无关），
-# 广告和汽车无关的卡片默认折叠。分类失败回落到「内容」（正常展示），不阻塞推送。
+# DeepSeek 内容分类：每条新帖打标签；广告、汽车无关和非中国汽车行业内容
+# 默认直接丢弃。分类失败回落到「行业观察」（正常展示），不阻塞推送。
 classification_enabled: true
+drop_ads: true
+drop_offtopic: true
+drop_non_china: true
 deepseek_api_key: ""
 deepseek_base_url: "https://api.deepseek.com"
 deepseek_model: "deepseek-chat"
@@ -70,3 +78,4 @@ classify_timeout: 15.0
 
 log_level: INFO
 log_dir: logs
+console_log: true              # launchd 部署建议设为 false，避免重复写 stderr

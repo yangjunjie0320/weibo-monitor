@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime as dt
+from dataclasses import dataclass
 
 from pydantic import BaseModel
 
@@ -8,6 +9,31 @@ from pydantic import BaseModel
 class Account(BaseModel):
     name: str
     uid: str
+
+
+@dataclass(frozen=True)
+class PushResult:
+    """推送处理结果，区分真实发送、业务丢弃与失败。"""
+
+    handled: bool
+    pushed: bool = False
+    dropped: bool = False
+
+    @classmethod
+    def sent(cls) -> PushResult:
+        return cls(handled=True, pushed=True)
+
+    @classmethod
+    def discarded(cls) -> PushResult:
+        return cls(handled=True, dropped=True)
+
+    @classmethod
+    def processed(cls) -> PushResult:
+        return cls(handled=True)
+
+    @classmethod
+    def failed(cls) -> PushResult:
+        return cls(handled=False)
 
 
 class VideoInfo(BaseModel):

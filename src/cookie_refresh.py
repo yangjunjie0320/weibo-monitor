@@ -3,7 +3,10 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import stat
+import tempfile
 import time
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -43,10 +46,43 @@ def build_cookie_string(cookies: list[dict[str, Any]]) -> str:
 
 def write_cookie_file(cookies: list[dict[str, Any]], target: str) -> None:
     path = Path(target)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(build_cookie_string(cookies) + "\n", encoding="utf-8")
-    os.replace(tmp, path)
+    _ensure_private_directory(path.parent)
+    payload = (build_cookie_string(cookies) + "\n").encode("utf-8")
+    fd, temporary_name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
+    temporary = Path(temporary_name)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            os.fchmod(handle.fileno(), 0o600)
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        os.chmod(path, 0o600)
+        _fsync_directory(path.parent)
+    except OSError:
+        with suppress(OSError):
+            temporary.unlink(missing_ok=True)
+        raise
+
+
+def _ensure_private_directory(path: Path) -> None:
+    path.mkdir(parents=True, exist_ok=True, mode=0o700)
+    resolved = path.resolve()
+    protected_roots = {Path.cwd().resolve(), Path.home().resolve(), Path(resolved.anchor)}
+    mode = path.stat().st_mode
+    if resolved not in protected_roots and not mode & stat.S_ISVTX:
+        os.chmod(path, 0o700)
+
+
+def _fsync_directory(path: Path) -> None:
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    directory_fd = os.open(path, flags)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
 
 
 def cookie_is_stale(cookie_file: str, stale_before_seconds: int) -> bool:

@@ -1,3 +1,4 @@
+import stat
 import time
 
 import httpx
@@ -16,6 +17,8 @@ def test_cookie_string_roundtrip(tmp_path):
     write_cookie_file(cookies, str(target))
     assert target.read_text(encoding="utf-8").strip() == "SUB=abc; SUBP=def"
     assert build_cookie_string(cookies) == "SUB=abc; SUBP=def"
+    assert stat.S_IMODE(target.stat().st_mode) == 0o600
+    assert stat.S_IMODE(target.parent.stat().st_mode) == 0o700
 
 
 def test_cookie_staleness(tmp_path):

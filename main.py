@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import logging
+import os
 import sys
 from pathlib import Path
 
@@ -11,16 +12,18 @@ import lark_oapi as lark
 import yaml
 
 from src import log
+from src.atomic_json import load_json_object
 from src.bitable import BitableSyncer
 from src.card_store import CardStore
 from src.config import Settings
 from src.forward import ForwardService, ForwardStore
+from src.health import HealthStore
 from src.listener import CardActionListener
 from src.models import Account
 from src.monitor import Monitor
 from src.sender import PostPusher
 from src.state import StateStore
-from src.weibo import WeiboClient
+from src.weibo import RateLimitedError, WeiboClient, extract_mblogs
 
 
 def load_accounts(path: str | Path) -> list[Account]:
@@ -52,14 +55,24 @@ async def _consume_forwards(listener: CardActionListener, service: ForwardServic
             logger.exception("forward process failed: mid=%s", event.mid)
 
 
-def _log_task_death(task: asyncio.Task) -> None:
-    if task.cancelled():
-        return
-    exc = task.exception()
-    if exc is not None:
-        logging.getLogger(__name__).critical(
-            "background task %s died: %s", task.get_name(), exc
-        )
+async def _run_supervised(monitor: Monitor, side_tasks: list[asyncio.Task]) -> None:
+    """Run all essential service tasks; any unexpected exit terminates the process."""
+
+    monitor_task = asyncio.create_task(monitor.run_forever(), name="monitor")
+    tasks = [monitor_task, *side_tasks]
+    try:
+        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+        for task in done:
+            if task.cancelled():
+                raise RuntimeError(f"essential task cancelled: {task.get_name()}")
+            exc = task.exception()
+            if exc is not None:
+                raise RuntimeError(f"essential task died: {task.get_name()}: {exc}") from exc
+            raise RuntimeError(f"essential task exited unexpectedly: {task.get_name()}")
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 async def _run(settings: Settings, *, once: bool, dry_run: bool) -> None:
@@ -79,11 +92,16 @@ async def _run(settings: Settings, *, once: bool, dry_run: bool) -> None:
         forward_on = settings.forward_enabled and lark_client is not None
         card_store = CardStore(settings.card_store_file) if forward_on else None
 
-        state = StateStore(settings.state_file, settings.seen_mids_per_account)
+        state = StateStore(
+            settings.state_file,
+            settings.seen_mids_per_account,
+            read_only=dry_run,
+        )
+        health = HealthStore(settings.health_file, read_only=dry_run)
         pusher = PostPusher(
             settings, lark_client, http_client, card_store=card_store, dry_run=dry_run
         )
-        monitor = Monitor(settings, weibo_client, state, pusher, accounts)
+        monitor = Monitor(settings, weibo_client, state, pusher, accounts, health)
 
         logger.info(
             "weibo-monitor started: accounts=%d interval=%ds dry_run=%s forward=%s",
@@ -93,11 +111,12 @@ async def _run(settings: Settings, *, once: bool, dry_run: bool) -> None:
             forward_on,
         )
         if once:
-            await monitor.run_cycle()
+            summary = await monitor.run_cycle()
+            monitor.finish_once(summary)
             return
 
-        # 转发侧任务（长连接监听 + 多维表格归档同步）与轮询并行；
-        # 它们意外挂掉只记日志，不拖垮监控主循环
+        # 转发侧任务（长连接、重试队列、多维表格归档）与轮询并行；
+        # 任一关键任务意外退出都会让进程失败，由 launchd 拉起全套服务。
         side_tasks: list[asyncio.Task] = []
         if forward_on:
             forward_store = ForwardStore(settings.forwarded_file)
@@ -106,6 +125,9 @@ async def _run(settings: Settings, *, once: bool, dry_run: bool) -> None:
             side_tasks.append(
                 asyncio.create_task(_consume_forwards(listener, service), name="forward-listener")
             )
+            side_tasks.append(
+                asyncio.create_task(service.run_forever(), name="forward-retry")
+            )
             if settings.bitable_url:
                 syncer = BitableSyncer(settings, lark_client, forward_store)
                 side_tasks.append(
@@ -113,14 +135,69 @@ async def _run(settings: Settings, *, once: bool, dry_run: bool) -> None:
                 )
             else:
                 logger.warning("forward enabled but bitable_url not set, archive stays local")
-        for task in side_tasks:
-            task.add_done_callback(_log_task_death)
+        await _run_supervised(monitor, side_tasks)
 
-        try:
-            await monitor.run_forever()
-        finally:
-            for task in side_tasks:
-                task.cancel()
+
+def _self_check(settings: Settings, config_path: str | Path | None = None) -> None:
+    accounts = load_accounts(settings.accounts_file)
+    if not settings.app_id or not settings.app_secret or not settings.chat_id:
+        raise RuntimeError("app_id, app_secret and chat_id must be configured")
+
+    for raw_path in (
+        settings.state_file,
+        settings.health_file,
+        settings.card_store_file,
+        settings.forwarded_file,
+    ):
+        path = Path(raw_path)
+        if path.exists():
+            load_json_object(path)
+        parent = path.parent
+        if not parent.exists() or not os.access(parent, os.W_OK):
+            raise RuntimeError(f"state directory is not writable: {parent}")
+
+    sensitive_paths: list[str | Path] = [settings.weibo_cookie_file]
+    if config_path is not None:
+        sensitive_paths.append(config_path)
+    for raw_path in sensitive_paths:
+        path = Path(raw_path)
+        if not path.exists():
+            continue
+        if path.stat().st_mode & 0o077:
+            raise RuntimeError(f"sensitive file permissions must be 0600: {path}")
+
+    from playwright.sync_api import sync_playwright
+
+    with sync_playwright() as playwright:
+        executable = Path(playwright.chromium.executable_path)
+        if not executable.exists():
+            raise RuntimeError(f"Playwright Chromium is not installed: {executable}")
+    print(f"self-check ok: accounts={len(accounts)}")
+
+
+async def _probe(settings: Settings, uid: str | None) -> int:
+    accounts = load_accounts(settings.accounts_file)
+    account = accounts[0]
+    if uid:
+        account = next((item for item in accounts if item.uid == uid), None)
+        if account is None:
+            logging.getLogger(__name__).error("probe uid is not configured: %s", uid)
+            return 1
+
+    try:
+        async with httpx.AsyncClient() as http_client:
+            client = WeiboClient(settings, http_client)
+            await client.ensure_cookie()
+            data = await client.timeline_page(account.uid, 1)
+            count = len(extract_mblogs(data))
+    except RateLimitedError as exc:
+        logging.getLogger(__name__).warning("probe rate limited: %s", exc)
+        return 2
+    except Exception as exc:
+        logging.getLogger(__name__).error("probe failed: %s", exc)
+        return 1
+    print(f"probe ok: uid={account.uid} posts={count}")
+    return 0
 
 
 def main() -> None:
@@ -136,12 +213,37 @@ def main() -> None:
     parser.add_argument(
         "--dry-run", action="store_true", help="fetch and diff but log instead of sending"
     )
+    parser.add_argument(
+        "--self-check", action="store_true", help="validate local runtime without network access"
+    )
+    parser.add_argument(
+        "--probe",
+        nargs="?",
+        const="",
+        metavar="UID",
+        help="fetch one configured account without sending or writing state",
+    )
     args = parser.parse_args()
 
     config_path = args.config or ("config.yaml" if Path("config.yaml").exists() else None)
     settings = Settings.from_yaml(config_path) if config_path else Settings()
 
-    log.setup(level=settings.log_level, log_dir=settings.log_dir)
+    log.setup(
+        level=settings.log_level,
+        log_dir=settings.log_dir,
+        console_log=settings.console_log,
+    )
+
+    if args.self_check:
+        try:
+            _self_check(settings, config_path)
+        except Exception as exc:
+            logging.getLogger(__name__).critical("self-check failed: %s", exc)
+            sys.exit(1)
+        return
+
+    if args.probe is not None:
+        sys.exit(asyncio.run(_probe(settings, args.probe or None)))
 
     if args.list_chats:
         from src.chats import list_chats

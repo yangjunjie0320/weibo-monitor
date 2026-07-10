@@ -1,11 +1,8 @@
 from __future__ import annotations
 
-import json
-import logging
-import os
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from .atomic_json import AtomicJsonError, atomic_write_json, load_json_object
 
 
 class StateStore:
@@ -14,23 +11,25 @@ class StateStore:
     结构：{"accounts": {uid: {"mids": [最新在前], "last_poll": iso}}}
     """
 
-    def __init__(self, path: str | Path, keep_per_account: int = 200) -> None:
+    def __init__(
+        self,
+        path: str | Path,
+        keep_per_account: int = 200,
+        *,
+        read_only: bool = False,
+    ) -> None:
         self._path = Path(path)
         self._keep = keep_per_account
+        self._read_only = read_only
         self._accounts: dict[str, dict] = {}
         self._load()
 
     def _load(self) -> None:
-        if not self._path.exists():
-            return
-        try:
-            data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as exc:
-            logger.error("state file unreadable, starting fresh: %s: %s", self._path, exc)
-            return
-        accounts = data.get("accounts")
-        if isinstance(accounts, dict):
-            self._accounts = accounts
+        data = load_json_object(self._path, default={"accounts": {}})
+        accounts = data.get("accounts", {})
+        if not isinstance(accounts, dict):
+            raise AtomicJsonError(f"state accounts must be an object: {self._path}")
+        self._accounts = accounts
 
     def has_account(self, uid: str) -> bool:
         return uid in self._accounts
@@ -48,10 +47,6 @@ class StateStore:
             entry["last_poll"] = last_poll
 
     def save(self) -> None:
-        self._path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(
-            json.dumps({"accounts": self._accounts}, ensure_ascii=False, indent=1),
-            encoding="utf-8",
-        )
-        os.replace(tmp, self._path)
+        if self._read_only:
+            return
+        atomic_write_json(self._path, {"accounts": self._accounts})
