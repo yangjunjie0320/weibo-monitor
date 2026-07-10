@@ -234,6 +234,13 @@ async def _source_check(settings: Settings) -> int:
     return 0
 
 
+async def _source_check_and_probe(settings: Settings, uid: str | None) -> int:
+    result = await _source_check(settings)
+    if result != 0:
+        return result
+    return await _probe(settings, uid)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Weibo monitor: push new posts to Feishu")
     parser.add_argument("--config", metavar="PATH", help="YAML config file path")
@@ -281,11 +288,15 @@ def main() -> None:
             sys.exit(1)
         return
 
+    if args.source_check:
+        if args.probe is not None:
+            sys.exit(
+                asyncio.run(_source_check_and_probe(settings, args.probe or None))
+            )
+        sys.exit(asyncio.run(_source_check(settings)))
+
     if args.probe is not None:
         sys.exit(asyncio.run(_probe(settings, args.probe or None)))
-
-    if args.source_check:
-        sys.exit(asyncio.run(_source_check(settings)))
 
     if args.list_chats:
         from src.chats import list_chats

@@ -194,6 +194,47 @@ async def test_subprocess_timeout_kills_cli(tmp_path, monkeypatch):
     assert process.killed
 
 
+async def test_access_token_is_exported_once_and_kept_out_of_arguments(tmp_path, monkeypatch):
+    path = executable(tmp_path)
+    catalog = {"commands": [{"action": "user_timeline_batch", "access": "allowed"}]}
+    creator = AsyncMock(
+        side_effect=[
+            FakeProcess(stdout=b"at_secret\n"),
+            FakeProcess(stdout=b'{"ready": true}'),
+            FakeProcess(stdout=json.dumps(catalog).encode()),
+            FakeProcess(stdout=b'{"statuses": []}'),
+        ]
+    )
+    monkeypatch.setattr("src.weibo_cli.asyncio.create_subprocess_exec", creator)
+    client = OfficialCliClient(settings(tmp_path, weibo_cli_path=str(path)))
+
+    await client.source_check()
+    await client.probe("42")
+
+    assert creator.await_count == 4
+    assert creator.await_args_list[0].args[1:4] == ("auth", "token", "--export")
+    for call in creator.await_args_list[1:]:
+        assert "at_secret" not in call.args
+        assert call.kwargs["env"]["WEIBO_CLI_TOKEN"] == "at_secret"
+
+
+async def test_unauthorized_command_refreshes_token_once(tmp_path, monkeypatch):
+    path = executable(tmp_path)
+    creator = AsyncMock(
+        side_effect=[
+            FakeProcess(stdout=b"at_first\n"),
+            FakeProcess(stderr=b"login expired [UNAUTHORIZED]", returncode=1),
+            FakeProcess(stdout=b"at_second\n"),
+            FakeProcess(stdout=b'{"statuses": []}'),
+        ]
+    )
+    monkeypatch.setattr("src.weibo_cli.asyncio.create_subprocess_exec", creator)
+    client = OfficialCliClient(settings(tmp_path, weibo_cli_path=str(path)))
+
+    assert await client.probe("42") == {"ok": 1, "statuses": []}
+    assert creator.await_count == 4
+
+
 def test_offline_install_check_requires_pinned_version(tmp_path):
     path = executable(tmp_path)
     check_cli_install(settings(tmp_path, weibo_cli_path=str(path)))

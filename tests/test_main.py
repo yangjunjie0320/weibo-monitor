@@ -98,6 +98,24 @@ async def test_source_check_does_not_probe_content(tmp_path, monkeypatch):
     source_check.assert_awaited_once()
 
 
+async def test_combined_deployment_check_runs_source_before_probe(tmp_path, monkeypatch):
+    order = []
+
+    async def source(settings):
+        order.append("source")
+        return 0
+
+    async def probe(settings, uid):
+        order.append(("probe", uid))
+        return 0
+
+    monkeypatch.setattr(main, "_source_check", source)
+    monkeypatch.setattr(main, "_probe", probe)
+
+    assert await main._source_check_and_probe(_settings(tmp_path), "42") == 0
+    assert order == ["source", ("probe", "42")]
+
+
 async def test_essential_side_task_failure_stops_supervisor():
     class FakeMonitor:
         async def run_forever(self):

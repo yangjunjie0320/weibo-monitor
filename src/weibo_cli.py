@@ -26,6 +26,8 @@ from .weibo import (
 logger = logging.getLogger(__name__)
 
 _UTC = dt.UTC
+_TOKEN_CACHE: dict[str, str] = {}
+_TOKEN_LOCKS: dict[str, asyncio.Lock] = {}
 _RATE_MARKERS = (
     "too_many_requests",
     "rate limit",
@@ -36,7 +38,14 @@ _RATE_MARKERS = (
     "余额不足",
     "429",
 )
-_AUTH_MARKERS = ("unauthorized", "auth login", "登录已失效", "未登录", "401")
+_AUTH_MARKERS = (
+    "unauthorized",
+    "auth login",
+    "登录已失效",
+    "缺少登录令牌",
+    "未登录",
+    "401",
+)
 _CONFIG_MARKERS = (
     "subscription",
     "plan_not_allowed",
@@ -295,31 +304,24 @@ class OfficialCliClient:
 
     async def _invoke_json(self, arguments: list[str]) -> dict[str, Any]:
         path = _cli_path(self._settings)
+        token = await _get_access_token(self._settings, path)
+        try:
+            return await self._invoke_json_with_token(path, arguments, token)
+        except AuthenticationError:
+            _TOKEN_CACHE.pop(path, None)
+            token = await _get_access_token(self._settings, path)
+            return await self._invoke_json_with_token(path, arguments, token)
+
+    async def _invoke_json_with_token(
+        self, path: str, arguments: list[str], token: str
+    ) -> dict[str, Any]:
         env = dict(os.environ)
         env["NODE_ENV"] = "production"
-        try:
-            process = await asyncio.create_subprocess_exec(
-                path,
-                *arguments,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                env=env,
-            )
-            stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=self._settings.weibo_cli_timeout
-            )
-        except TimeoutError as exc:
-            if "process" in locals():
-                process.kill()
-                await process.wait()
-            raise UpstreamError("official CLI timed out") from exc
-        except OSError as exc:
-            raise SourceConfigurationError("cannot start official CLI") from exc
-
-        max_bytes = self._settings.weibo_cli_max_output_bytes
-        if len(stdout) > max_bytes or len(stderr) > max_bytes:
-            raise UpstreamError("official CLI output exceeded configured limit")
-        if process.returncode != 0:
+        env["WEIBO_CLI_TOKEN"] = token
+        returncode, stdout, stderr = await _run_process(
+            self._settings, path, arguments, env
+        )
+        if returncode != 0:
             _raise_cli_error(stderr.decode("utf-8", errors="replace"))
         try:
             payload = json.loads(stdout)
@@ -347,6 +349,61 @@ def _status_uid(status: dict[str, Any]) -> str:
     if not isinstance(user, dict):
         return ""
     return str(user.get("idstr") or user.get("id") or "")
+
+
+async def _get_access_token(settings: Settings, path: str) -> str:
+    cached = _TOKEN_CACHE.get(path)
+    if cached:
+        return cached
+    lock = _TOKEN_LOCKS.setdefault(path, asyncio.Lock())
+    async with lock:
+        cached = _TOKEN_CACHE.get(path)
+        if cached:
+            return cached
+        env = dict(os.environ)
+        env["NODE_ENV"] = "production"
+        env.pop("WEIBO_CLI_TOKEN", None)
+        env.pop("WEIBO_TOKEN", None)
+        returncode, stdout, stderr = await _run_process(
+            settings, path, ["auth", "token", "--export"], env
+        )
+        if returncode != 0:
+            _raise_cli_error(stderr.decode("utf-8", errors="replace"))
+        token = stdout.decode("utf-8", errors="strict").strip()
+        if not token or any(char.isspace() for char in token) or len(token) > 4096:
+            raise AuthenticationError("official CLI returned an invalid access token")
+        _TOKEN_CACHE[path] = token
+        return token
+
+
+async def _run_process(
+    settings: Settings,
+    path: str,
+    arguments: list[str],
+    env: dict[str, str],
+) -> tuple[int, bytes, bytes]:
+    try:
+        process = await asyncio.create_subprocess_exec(
+            path,
+            *arguments,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await asyncio.wait_for(
+            process.communicate(), timeout=settings.weibo_cli_timeout
+        )
+    except TimeoutError as exc:
+        if "process" in locals():
+            process.kill()
+            await process.wait()
+        raise UpstreamError("official CLI timed out") from exc
+    except OSError as exc:
+        raise SourceConfigurationError("cannot start official CLI") from exc
+    max_bytes = settings.weibo_cli_max_output_bytes
+    if len(stdout) > max_bytes or len(stderr) > max_bytes:
+        raise UpstreamError("official CLI output exceeded configured limit")
+    return process.returncode, stdout, stderr
 
 
 def _raise_cli_error(stderr: str) -> None:
