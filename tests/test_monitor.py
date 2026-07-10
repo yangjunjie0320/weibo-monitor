@@ -1,4 +1,5 @@
 import datetime as dt
+from unittest.mock import AsyncMock
 
 from src.config import Settings
 from src.health import HealthStore
@@ -100,6 +101,71 @@ async def test_new_post_is_pushed_once(tmp_path):
     summary = await monitor.run_cycle()
     assert summary["pushed"] == 0
     assert len(pusher.pushed) == 1
+
+
+async def test_official_source_prepares_once_and_skips_account_delays(tmp_path, monkeypatch):
+    class PreparedWeibo(FakeWeibo):
+        def __init__(self):
+            super().__init__({1: timeline(make_card("m1", dt.timedelta(hours=1)))})
+            self.prepared = []
+
+        async def prepare_cycle(self, accounts):
+            self.prepared.append([account.uid for account in accounts])
+
+    configured = Settings(
+        weibo_source="official_cli",
+        state_file=str(tmp_path / "seen.json"),
+        account_delay_min_seconds=8,
+        account_delay_max_seconds=15,
+        forward_enabled=False,
+    )
+    client = PreparedWeibo()
+    sleeper = AsyncMock()
+    monkeypatch.setattr("src.monitor.asyncio.sleep", sleeper)
+    monitor = Monitor(
+        configured,
+        client,
+        StateStore(configured.state_file),
+        FakePusher(),
+        [ACCOUNT, Account(name="第二个", uid="43")],
+        HealthStore(tmp_path / "health.json"),
+    )
+
+    await monitor.run_cycle()
+
+    assert client.prepared == [["42", "43"]]
+    sleeper.assert_not_awaited()
+
+
+async def test_official_prepare_rate_limit_aborts_before_accounts(tmp_path):
+    from src.weibo import RateLimitedError
+
+    class LimitedPrepare(FakeWeibo):
+        async def prepare_cycle(self, accounts):
+            raise RateLimitedError("official CLI quota", status_code=429)
+
+        async def timeline_page(self, uid, page):
+            raise AssertionError("account polling must not start")
+
+    configured = Settings(
+        weibo_source="official_cli",
+        state_file=str(tmp_path / "seen.json"),
+        forward_enabled=False,
+    )
+    monitor = Monitor(
+        configured,
+        LimitedPrepare({}),
+        StateStore(configured.state_file),
+        FakePusher(),
+        [ACCOUNT],
+        HealthStore(tmp_path / "health.json"),
+    )
+
+    summary = await monitor.run_cycle()
+
+    assert summary["rate_limited"] is True
+    assert summary["attempted"] == 0
+    assert summary["failed"] == 1
 
 
 async def test_stale_unseen_post_marked_silently(tmp_path):

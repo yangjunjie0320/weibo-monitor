@@ -6,16 +6,17 @@
 
 ```
 每 poll_interval_seconds 一轮：
-  随机顺序遍历 accounts.yaml 里的账号
-    → m.weibo.cn container API 抓时间线第 1 页（必要时翻页，最多 max_pages_per_account）
+  将 accounts.yaml 的账号交错分为两个官方 CLI 批次
+    → statuses user_timeline_batch 每组获取最新 5 条
     → 与 state/seen.json 里的已见 mid 对比，找出新帖
-    → 长文补抓全文 → 上传首图 → 组卡片 → 发到 chat_id
+    → 可选旧接口补抓长文 → 上传首图 → 组卡片 → 发到 chat_id
     → 成功后落 state（失败的下轮重试）
 ```
 
-- 推荐使用浏览器登录 cookie；游客模式仅作降级，限流阈值更低。
-- HTTP 403/418/429/432 或 captcha 会立即熔断，并把退避时间持久化到
-  `state/health.json`，重启不会绕过封控。
+- 主时间线使用微博开放平台官方 CLI，需要 OAuth、开发者认证和 Plus 及以上套餐。
+- Plus 方案每小时两次读取、每次返回 5 条，约 7200 Credits/月。不会自动翻页或购买额度。
+- 旧接口只补抓长文；遇到 403/418/429/432 会单独熔断 12 小时，正文退回截断版，
+  不影响官方主周期健康状态。
 - 首次见到某账号只落 state 不推送（防冷启动刷屏）。
 - 卡片优先：图片上传失败不阻塞发卡。
 
@@ -24,6 +25,8 @@
 ```bash
 uv sync --extra dev
 uv run python -m playwright install chromium
+npm install --prefix .tools/weibo-cli --omit=dev --no-audit --no-fund --ignore-scripts \
+  @weibo-ai/weibo-cli@0.8.3
 cp config.example.yaml config.yaml   # 填 app_id / app_secret
 chmod 600 config.yaml
 uv run python main.py --list-chats   # 机器人拉进群后，挑 chat_id 填进 config.yaml
@@ -35,6 +38,7 @@ uv run python -u main.py             # 常驻运行
 
 ```bash
 uv run python main.py --self-check   # 不访问网络，检查配置/依赖/状态/权限
+uv run python main.py --source-check # 不读取微博，检查 OAuth、套餐和批量命令权限
 uv run python main.py --probe        # 只抓一个账号；0 正常 / 2 限流 / 1 故障
 ```
 

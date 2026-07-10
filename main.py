@@ -24,6 +24,7 @@ from src.monitor import Monitor
 from src.sender import PostPusher
 from src.state import StateStore
 from src.weibo import RateLimitedError, WeiboClient, extract_mblogs
+from src.weibo_cli import OfficialCliClient, check_cli_install
 
 
 def load_accounts(path: str | Path) -> list[Account]:
@@ -86,8 +87,16 @@ async def _run(settings: Settings, *, once: bool, dry_run: bool) -> None:
         lark_client = build_lark_client(settings)
 
     async with httpx.AsyncClient() as http_client:
-        weibo_client = WeiboClient(settings, http_client)
-        await weibo_client.ensure_cookie()
+        mobile_client = WeiboClient(settings, http_client)
+        if settings.weibo_source == "official_cli":
+            weibo_client = OfficialCliClient(
+                settings,
+                legacy_client=mobile_client if settings.legacy_extend_enabled else None,
+                read_only=dry_run,
+            )
+        else:
+            weibo_client = mobile_client
+            await weibo_client.ensure_cookie()
 
         forward_on = settings.forward_enabled and lark_client is not None
         card_store = CardStore(settings.card_store_file) if forward_on else None
@@ -148,6 +157,7 @@ def _self_check(settings: Settings, config_path: str | Path | None = None) -> No
         settings.health_file,
         settings.card_store_file,
         settings.forwarded_file,
+        settings.legacy_extend_state_file,
     ):
         path = Path(raw_path)
         if path.exists():
@@ -165,6 +175,9 @@ def _self_check(settings: Settings, config_path: str | Path | None = None) -> No
             continue
         if path.stat().st_mode & 0o077:
             raise RuntimeError(f"sensitive file permissions must be 0600: {path}")
+
+    if settings.weibo_source == "official_cli":
+        check_cli_install(settings)
 
     from playwright.sync_api import sync_playwright
 
@@ -186,9 +199,13 @@ async def _probe(settings: Settings, uid: str | None) -> int:
 
     try:
         async with httpx.AsyncClient() as http_client:
-            client = WeiboClient(settings, http_client)
-            await client.ensure_cookie()
-            data = await client.timeline_page(account.uid, 1)
+            if settings.weibo_source == "official_cli":
+                client = OfficialCliClient(settings, read_only=True)
+                data = await client.probe(account.uid)
+            else:
+                client = WeiboClient(settings, http_client)
+                await client.ensure_cookie()
+                data = await client.timeline_page(account.uid, 1)
             count = len(extract_mblogs(data))
     except RateLimitedError as exc:
         logging.getLogger(__name__).warning("probe rate limited: %s", exc)
@@ -197,6 +214,23 @@ async def _probe(settings: Settings, uid: str | None) -> int:
         logging.getLogger(__name__).error("probe failed: %s", exc)
         return 1
     print(f"probe ok: uid={account.uid} posts={count}")
+    return 0
+
+
+async def _source_check(settings: Settings) -> int:
+    if settings.weibo_source != "official_cli":
+        print("source-check ok: mobile source configured")
+        return 0
+    try:
+        client = OfficialCliClient(settings, read_only=True)
+        await client.source_check()
+    except RateLimitedError as exc:
+        logging.getLogger(__name__).warning("source-check rate limited: %s", exc)
+        return 2
+    except Exception as exc:
+        logging.getLogger(__name__).error("source-check failed: %s", exc)
+        return 1
+    print("source-check ok: official CLI ready and batch timeline allowed")
     return 0
 
 
@@ -215,6 +249,11 @@ def main() -> None:
     )
     parser.add_argument(
         "--self-check", action="store_true", help="validate local runtime without network access"
+    )
+    parser.add_argument(
+        "--source-check",
+        action="store_true",
+        help="validate official CLI authentication, subscription and command access",
     )
     parser.add_argument(
         "--probe",
@@ -244,6 +283,9 @@ def main() -> None:
 
     if args.probe is not None:
         sys.exit(asyncio.run(_probe(settings, args.probe or None)))
+
+    if args.source_check:
+        sys.exit(asyncio.run(_source_check(settings)))
 
     if args.list_chats:
         from src.chats import list_chats

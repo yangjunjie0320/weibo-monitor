@@ -41,6 +41,7 @@ def empty_cycle(accounts_total: int = 0) -> dict[str, int | bool]:
         "pushed": 0,
         "dropped": 0,
         "rate_limited": False,
+        "source_requests": 0,
     }
 
 

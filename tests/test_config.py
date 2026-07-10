@@ -59,6 +59,8 @@ def test_forward_target_is_required_only_when_enabled():
         ),
         ({"rate_limit_jitter_ratio": 1.1}, "rate_limit_jitter_ratio"),
         ({"image_max_bytes": 0}, "image_max_bytes"),
+        ({"weibo_cli_count": 21}, "weibo_cli_count"),
+        ({"weibo_cli_max_users_per_batch": 21}, "weibo_cli_max_users_per_batch"),
     ],
 )
 def test_settings_reject_invalid_ranges(overrides, message):
@@ -75,3 +77,8 @@ def test_reliability_defaults():
     assert settings.upstream_failure_threshold == 3
     assert settings.image_max_bytes == 10 * 1024 * 1024
     assert settings.console_log
+    assert settings.weibo_source == "official_cli"
+    assert settings.weibo_cli_version == "0.8.3"
+    assert settings.weibo_cli_count == 5
+    assert settings.poll_interval_seconds == 3600
+    assert settings.legacy_extend_cooldown_seconds == 43200

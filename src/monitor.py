@@ -15,8 +15,8 @@ from .state import StateStore
 from .weibo import (
     AuthenticationError,
     RateLimitedError,
+    SourceConfigurationError,
     UpstreamError,
-    WeiboClient,
     WeiboError,
     extract_mblogs,
     parse_post,
@@ -29,11 +29,19 @@ class Pusher(Protocol):
     async def push(self, post: Post) -> bool | PushResult: ...
 
 
+class TimelineClient(Protocol):
+    async def timeline_page(self, uid: str, page: int) -> dict[str, Any]: ...
+
+    async def fetch_extend(self, mid: str) -> dict[str, Any]: ...
+
+    def reload_static_cookie(self) -> None: ...
+
+
 class Monitor:
     def __init__(
         self,
         settings: Settings,
-        client: WeiboClient,
+        client: TimelineClient,
         state: StateStore,
         pusher: Pusher,
         accounts: list[Account],
@@ -125,13 +133,39 @@ class Monitor:
             await asyncio.sleep(delay)
 
     async def run_cycle(self) -> dict[str, Any]:
-        if await ensure_fresh_cookie(self._settings):
+        if self._settings.weibo_source == "mobile" and await ensure_fresh_cookie(
+            self._settings
+        ):
             self._client.reload_static_cookie()
         accounts = list(self._accounts)
         random.shuffle(accounts)
         summary: dict[str, Any] = empty_cycle(len(accounts))
         consecutive_upstream_failures = 0
         self._health.write(status="starting", cycle=_cycle_stats(summary), last_error=None)
+
+        prepare_cycle = getattr(self._client, "prepare_cycle", None)
+        if prepare_cycle is not None:
+            try:
+                await prepare_cycle(self._accounts)
+                summary["source_requests"] = int(
+                    getattr(self._client, "last_cycle_requests", 0)
+                )
+            except RateLimitedError as exc:
+                summary["failed"] = 1
+                summary["rate_limited"] = True
+                summary["retry_after_seconds"] = exc.retry_after_seconds or 0
+                summary["last_error"] = _error("rate_limited", exc)
+                return summary
+            except (AuthenticationError, SourceConfigurationError) as exc:
+                summary["failed"] = 1
+                summary["upstream_aborted"] = True
+                summary["last_error"] = _error("source_configuration", exc)
+                return summary
+            except UpstreamError as exc:
+                summary["failed"] = 1
+                summary["upstream_aborted"] = True
+                summary["last_error"] = _error("upstream", exc)
+                return summary
 
         for index, account in enumerate(accounts):
             summary["attempted"] += 1
@@ -197,7 +231,7 @@ class Monitor:
                 cycle=_cycle_stats(summary),
                 last_error=summary.get("last_error"),
             )
-            if index < len(accounts) - 1:
+            if index < len(accounts) - 1 and self._settings.weibo_source == "mobile":
                 await asyncio.sleep(
                     random.uniform(
                         self._settings.account_delay_min_seconds,
@@ -207,7 +241,7 @@ class Monitor:
 
         logger.info(
             "cycle summary: accounts=%d attempted=%d succeeded=%d new=%d pushed=%d "
-            "dropped=%d failed=%d rate_limited=%s",
+            "dropped=%d failed=%d rate_limited=%s source_requests=%d",
             summary["accounts_total"],
             summary["attempted"],
             summary["succeeded"],
@@ -216,6 +250,7 @@ class Monitor:
             summary["dropped"],
             summary["failed"],
             summary["rate_limited"],
+            summary["source_requests"],
         )
         return summary
 
@@ -296,7 +331,7 @@ class Monitor:
         pushed = 0
         dropped = 0
         for mblog, post in sorted(new_posts, key=lambda item: item[1].created_at):
-            if mblog.get("isLongText"):
+            if post.text_truncated:
                 extend = await self._client.fetch_extend(post.mid)
                 refreshed = parse_post(account, {}, mblog, extend)
                 if refreshed:
@@ -391,6 +426,7 @@ def _cycle_stats(summary: dict[str, Any]) -> dict[str, int | bool]:
         "pushed": int(summary.get("pushed", 0)),
         "dropped": int(summary.get("dropped", 0)),
         "rate_limited": bool(summary.get("rate_limited", False)),
+        "source_requests": int(summary.get("source_requests", 0)),
     }
 
 

@@ -107,6 +107,14 @@ def build_post_card(
     elif text:
         elements.append({"tag": "markdown", "content": text})
 
+    if post.text_truncated:
+        elements.append(
+            {
+                "tag": "markdown",
+                "content": f"*长文正文可能被截断，请[查看原帖]({post.url})。*",
+            }
+        )
+
     if post.is_repost:
         quoted = _truncate(post.retweeted_text_plain, REPOST_PREVIEW_CHARS)
         author = f"@{post.retweeted_screen_name}" if post.retweeted_screen_name else "原帖"

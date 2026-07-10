@@ -66,6 +66,10 @@ class UpstreamError(WeiboError):
     """微博上游临时故障，可做有限次数重试。"""
 
 
+class SourceConfigurationError(WeiboError):
+    """数据源安装、命令或套餐配置不满足运行要求。"""
+
+
 class RateLimitedError(WeiboError):
     """captcha/visitor 挑战：IP 级限流，重试无益，调用方应熔断休息。"""
 
@@ -392,6 +396,14 @@ def extract_pics(mblog: dict[str, Any]) -> list[str]:
         large = pic.get("large") or {}
         pics.append(large.get("url") or pic.get("url"))
     if not pics:
+        for pic in mblog.get("pic_urls") or []:
+            if isinstance(pic, dict) and pic.get("thumbnail_pic"):
+                pics.append(pic["thumbnail_pic"])
+    if not pics:
+        for pid in mblog.get("pic_ids") or []:
+            if pid:
+                pics.append(f"https://wx1.sinaimg.cn/large/{pid}.jpg")
+    if not pics:
         for key in ("original_pic", "bmiddle_pic", "thumbnail_pic"):
             if mblog.get(key):
                 pics.append(mblog[key])
@@ -416,6 +428,10 @@ def extract_video_info(mblog: dict[str, Any]) -> VideoInfo | None:
 
 def extract_mblogs(data: dict[str, Any]) -> list[tuple[dict[str, Any], dict[str, Any]]]:
     """从 timeline 响应提取 (card, mblog) 对，兼容 card_type 9 与 11（嵌套组）。"""
+    statuses = data.get("statuses")
+    if isinstance(statuses, list):
+        return [({}, item) for item in statuses if isinstance(item, dict)]
+
     results = []
     for card in data.get("data", {}).get("cards", []) or []:
         if card.get("card_type") == 11:
@@ -445,7 +461,15 @@ def _text_fields(mblog: dict[str, Any], extend: dict[str, Any] | None) -> tuple[
     if extend and extend.get("longTextContent"):
         text_html = str(extend["longTextContent"])
     else:
-        text_html = str(mblog.get("raw_text") or mblog.get("text_raw") or mblog.get("text") or "")
+        long_text = mblog.get("longText") or {}
+        text_html = str(
+            (long_text.get("longTextContent") if isinstance(long_text, dict) else "")
+            or mblog.get("longTextContent")
+            or mblog.get("raw_text")
+            or mblog.get("text_raw")
+            or mblog.get("text")
+            or ""
+        )
     return text_html, html_to_text(text_html)
 
 
@@ -458,7 +482,7 @@ def parse_post(
     created_at = parse_weibo_datetime(mblog.get("created_at"))
     if not created_at:
         return None
-    mid = str(mblog.get("mid") or mblog.get("id") or "")
+    mid = str(mblog.get("mid") or mblog.get("idstr") or mblog.get("id") or "")
     if not mid:
         return None
 
@@ -471,6 +495,14 @@ def parse_post(
         retweeted_text_plain = ""
 
     user = mblog.get("user") or {}
+    has_embedded_long_text = bool(
+        mblog.get("longTextContent")
+        or (
+            isinstance(mblog.get("longText"), dict)
+            and mblog["longText"].get("longTextContent")
+        )
+        or (extend and extend.get("longTextContent"))
+    )
     return Post(
         uid=account.uid,
         screen_name=str(user.get("screen_name") or account.name),
@@ -490,4 +522,6 @@ def parse_post(
         video=extract_video_info(mblog),
         retweeted_screen_name=str((retweeted.get("user") or {}).get("screen_name") or ""),
         retweeted_text_plain=retweeted_text_plain,
+        text_truncated=bool(mblog.get("isLongText") or mblog.get("truncated"))
+        and not has_embedded_long_text,
     )

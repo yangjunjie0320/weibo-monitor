@@ -89,6 +89,13 @@ def test_long_text_folds():
     assert "collapsible_panel" in tags
 
 
+def test_truncated_long_text_has_original_link_note():
+    card = build_post_card(make_post(text_truncated=True))
+    dumped = json.dumps(card, ensure_ascii=False)
+    assert "长文正文可能被截断" in dumped
+    assert "https://weibo.com/42/Babc" in dumped
+
+
 def test_repost_marker_and_quote():
     post = make_post(
         is_repost=True,

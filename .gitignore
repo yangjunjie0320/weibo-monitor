@@ -5,6 +5,7 @@ cookies/
 browser-data/
 logs/
 .venv/
+.tools/
 __pycache__/
 *.egg-info/
 .pytest_cache/

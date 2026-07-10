@@ -48,6 +48,7 @@ async def test_monitor_persists_rate_limit_backoff_across_restart(tmp_path, monk
         rate_limit_rest_seconds=1800,
         rate_limit_rest_max_seconds=43200,
         rate_limit_jitter_ratio=0,
+        poll_interval_seconds=600,
     )
     monitor = Monitor(settings, None, None, None, [object()], health)
     monitor.run_cycle = AsyncMock(

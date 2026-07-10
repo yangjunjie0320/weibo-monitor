@@ -1,4 +1,5 @@
 import asyncio
+from unittest.mock import AsyncMock
 
 import yaml
 
@@ -19,6 +20,7 @@ def _settings(tmp_path) -> Settings:
         health_file=str(tmp_path / "health.json"),
         weibo_cookie_file=str(tmp_path / "cookie.txt"),
         forward_enabled=False,
+        weibo_source="mobile",
     )
 
 
@@ -58,6 +60,42 @@ async def test_probe_uses_exit_code_two_for_rate_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(main, "WeiboClient", LimitedWeibo)
 
     assert await main._probe(_settings(tmp_path), "42") == 2
+
+
+async def test_official_probe_uses_count_one_and_writes_no_state(tmp_path, monkeypatch):
+    class FakeOfficial:
+        def __init__(self, settings, read_only=False):
+            assert read_only
+
+        async def probe(self, uid):
+            assert uid == "42"
+            return {"ok": 1, "statuses": []}
+
+    monkeypatch.setattr(main, "OfficialCliClient", FakeOfficial)
+    configured = _settings(tmp_path)
+    configured.weibo_source = "official_cli"
+
+    assert await main._probe(configured, None) == 0
+    assert not (tmp_path / "seen.json").exists()
+    assert not (tmp_path / "health.json").exists()
+
+
+async def test_source_check_does_not_probe_content(tmp_path, monkeypatch):
+    source_check = AsyncMock()
+
+    class FakeOfficial:
+        def __init__(self, settings, read_only=False):
+            assert read_only
+
+        async def source_check(self):
+            await source_check()
+
+    monkeypatch.setattr(main, "OfficialCliClient", FakeOfficial)
+    configured = _settings(tmp_path)
+    configured.weibo_source = "official_cli"
+
+    assert await main._source_check(configured) == 0
+    source_check.assert_awaited_once()
 
 
 async def test_essential_side_task_failure_stops_supervisor():

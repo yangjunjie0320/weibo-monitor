@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 import yaml
 from pydantic import Field, model_validator
@@ -29,6 +30,18 @@ class Settings(BaseSettings):
     accounts_file: str = "accounts.yaml"
     state_file: str = "state/seen.json"
     health_file: str = "state/health.json"
+
+    # 微博主数据源。official_cli 走开放平台批量接口；mobile 仅保留为兼容路径。
+    weibo_source: Literal["official_cli", "mobile"] = "official_cli"
+    weibo_cli_path: str = ".tools/weibo-cli/node_modules/.bin/weibo"
+    weibo_cli_version: str = "0.8.3"
+    weibo_cli_timeout: float = Field(default=60.0, gt=0)
+    weibo_cli_max_output_bytes: int = Field(default=10 * 1024 * 1024, gt=0)
+    weibo_cli_max_users_per_batch: int = Field(default=20, ge=1, le=20)
+    weibo_cli_count: int = Field(default=5, ge=1, le=20)
+    legacy_extend_enabled: bool = True
+    legacy_extend_state_file: str = "state/legacy-extend.json"
+    legacy_extend_cooldown_seconds: int = Field(default=43200, gt=0)
 
     # 卡片转发按钮：点击转发到目标群，回调走长连接（需在开放平台把回调订阅
     # 方式设为长连接）。转发记录先落本地，再周期同步到多维表格归档。
@@ -61,7 +74,7 @@ class Settings(BaseSettings):
     upstream_failure_threshold: int = Field(default=3, gt=0)
     upstream_error_rest_seconds: int = Field(default=300, gt=0)
 
-    poll_interval_seconds: int = Field(default=600, gt=0)
+    poll_interval_seconds: int = Field(default=3600, gt=0)
     max_post_age_hours: int = Field(default=24, gt=0)
     max_pages_per_account: int = Field(default=3, gt=0)
     seen_mids_per_account: int = Field(default=200, gt=0)

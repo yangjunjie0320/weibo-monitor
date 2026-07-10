@@ -16,13 +16,29 @@ accounts_file: "accounts.yaml"
 state_file: "state/seen.json"
 health_file: "state/health.json"
 
+# 微博主数据源：官方 CLI Plus 批量接口。34 个账号会交错分成两组，
+# 每组取最新 5 条；每小时一轮约消耗 7200 Credits/月。
+weibo_source: "official_cli"
+weibo_cli_path: ".tools/weibo-cli/node_modules/.bin/weibo"
+weibo_cli_version: "0.8.3"
+weibo_cli_timeout: 60.0
+weibo_cli_max_output_bytes: 10485760
+weibo_cli_max_users_per_batch: 20
+weibo_cli_count: 5
+
+# Plus 不提供官方长文补抓，长文可选回退旧接口。旧接口限流只关闭长文补抓，
+# 不影响官方 CLI 主周期；熔断跨重启保存 12 小时。
+legacy_extend_enabled: true
+legacy_extend_state_file: "state/legacy-extend.json"
+legacy_extend_cooldown_seconds: 43200
+
 # 轮询节奏
-poll_interval_seconds: 600      # 每轮间隔（秒）
+poll_interval_seconds: 3600     # 每轮间隔（秒）；Plus 额度内方案为 1 小时
 max_post_age_hours: 24          # 超过此时长的帖子不再推送（防旧帖刷屏）
-max_pages_per_account: 3        # 每账号每轮最多翻页数
+max_pages_per_account: 3        # mobile 兼容源使用；官方 CLI 固定不隐式翻页
 seen_mids_per_account: 200      # 每账号在 state 里保留的已见 mid 数
 
-# 微博登录 cookie。不配则用游客 cookie（限流阈值低）。
+# 微博登录 cookie。官方 CLI 主时间线不使用；仅供旧接口补抓长文。
 # 推荐流程：uv run python main.py --browser-login 扫码登录一次，
 # cookie 会存到 weibo_cookie_file，之后临近过期自动从浏览器 profile 刷新。
 # 也可以手动把浏览器里的 Cookie 串（SUB=...; SUBP=...）粘到 weibo_cookie。
@@ -35,7 +51,7 @@ browser_timeout: 60.0
 cookie_stale_seconds: 259200        # cookie 文件超 3 天自动刷新
 cookie_refresh_min_interval: 3600   # 进程内刷新节流（秒）
 
-# 反爬节流：账号间随机延迟区间（秒）。2026-07 曾因请求过密触发 IP 级封禁，勿调小
+# mobile 兼容源的反爬节流；官方 CLI 批量源不使用账号间延迟。
 account_delay_min_seconds: 8.0
 account_delay_max_seconds: 15.0
 request_timeout: 20.0

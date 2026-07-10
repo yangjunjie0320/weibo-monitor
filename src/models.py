@@ -64,7 +64,10 @@ class Post(BaseModel):
     video: VideoInfo | None = None
     retweeted_screen_name: str = ""
     retweeted_text_plain: str = ""
+    text_truncated: bool = False
 
     @property
     def url(self) -> str:
-        return f"https://weibo.com/{self.uid}/{self.bid or self.mid}"
+        if self.bid:
+            return f"https://weibo.com/{self.uid}/{self.bid}"
+        return f"https://m.weibo.cn/detail/{self.mid}"
