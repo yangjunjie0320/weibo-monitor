@@ -335,9 +335,19 @@ class WeiboClient:
         except WeiboError as exc:
             logger.warning("extend fetch failed mid=%s: %s", mid, exc)
             return {}
-        if data.get("ok") == 1 and isinstance(data.get("data"), dict):
+        if isinstance(data.get("data"), dict):
             return data["data"]
         return {}
+
+    async def fetch_extend_strict(self, mid: str) -> dict[str, Any]:
+        """Single-attempt long-text request for the isolated optional fallback."""
+
+        data = await self._request_json_once(
+            f"https://m.weibo.cn/statuses/extend?id={urllib.parse.quote(mid)}"
+        )
+        if isinstance(data.get("data"), dict):
+            return data["data"]
+        raise UpstreamError("extend response has no data object")
 
 
 def _parse_retry_after(value: str | None) -> float | None:

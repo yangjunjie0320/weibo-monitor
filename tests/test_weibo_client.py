@@ -143,3 +143,19 @@ async def test_invalid_visitor_body_is_upstream_error(tmp_path):
         client = WeiboClient(settings(tmp_path), http)
         with pytest.raises(UpstreamError, match="invalid visitor response"):
             await client.refresh_visitor_cookie()
+
+
+async def test_strict_extend_does_not_retry_html_redirect(tmp_path):
+    calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal calls
+        calls += 1
+        return httpx.Response(302, headers={"Location": "https://weibo.com/"}, text="html")
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = WeiboClient(settings(tmp_path, request_retries=3), http)
+        with pytest.raises(UpstreamError):
+            await client.fetch_extend_strict("9")
+
+    assert calls == 1

@@ -20,6 +20,7 @@ from .weibo import (
     SourceConfigurationError,
     UpstreamError,
     WeiboClient,
+    WeiboError,
 )
 
 logger = logging.getLogger(__name__)
@@ -231,22 +232,14 @@ class OfficialCliClient:
         if blocked_until and blocked_until > _now():
             return {}
         try:
-            extend = await self._legacy.fetch_extend(mid)
+            extend = await self._legacy.fetch_extend_strict(mid)
         except RateLimitedError as exc:
-            blocked_until = _now() + dt.timedelta(
-                seconds=self._settings.legacy_extend_cooldown_seconds
+            self._block_legacy_source(
+                "rate_limited", f"HTTP {exc.status_code or '-'}"
             )
-            self._legacy_state.update(
-                status="rate_limited",
-                updated_at=_iso(_now()),
-                blocked_until=_iso(blocked_until),
-                last_error={"kind": "rate_limited", "message": f"HTTP {exc.status_code or '-'}"},
-            )
-            self._save_legacy_state()
-            logger.warning(
-                "legacy long-text source rate limited; disabled until %s",
-                _iso(blocked_until),
-            )
+            return {}
+        except WeiboError as exc:
+            self._block_legacy_source("upstream", type(exc).__name__)
             return {}
         if extend:
             self._legacy_state.update(
@@ -257,6 +250,23 @@ class OfficialCliClient:
             )
             self._save_legacy_state()
         return extend
+
+    def _block_legacy_source(self, kind: str, message: str) -> None:
+        blocked_until = _now() + dt.timedelta(
+            seconds=self._settings.legacy_extend_cooldown_seconds
+        )
+        self._legacy_state.update(
+            status="rate_limited",
+            updated_at=_iso(_now()),
+            blocked_until=_iso(blocked_until),
+            last_error={"kind": kind, "message": message},
+        )
+        self._save_legacy_state()
+        logger.warning(
+            "legacy long-text source unavailable; disabled until %s kind=%s",
+            _iso(blocked_until),
+            kind,
+        )
 
     async def _timeline_batch(self, uids: list[str], *, count: int) -> dict[str, Any]:
         return await self._invoke_json(

@@ -209,7 +209,7 @@ def test_offline_install_check_requires_pinned_version(tmp_path):
 
 async def test_legacy_rate_limit_is_persisted_and_does_not_propagate(tmp_path):
     legacy = AsyncMock()
-    legacy.fetch_extend.side_effect = RateLimitedError("HTTP 432", status_code=432)
+    legacy.fetch_extend_strict.side_effect = RateLimitedError("HTTP 432", status_code=432)
     configured = settings(
         tmp_path,
         legacy_extend_enabled=True,
@@ -225,12 +225,12 @@ async def test_legacy_rate_limit_is_persisted_and_does_not_propagate(tmp_path):
     after_restart = AsyncMock()
     second = OfficialCliClient(configured, legacy_client=after_restart)
     assert await second.fetch_extend("9") == {}
-    after_restart.fetch_extend.assert_not_awaited()
+    after_restart.fetch_extend_strict.assert_not_awaited()
 
 
 async def test_legacy_circuit_is_read_only_in_dry_run(tmp_path):
     legacy = AsyncMock()
-    legacy.fetch_extend.side_effect = RateLimitedError("HTTP 432", status_code=432)
+    legacy.fetch_extend_strict.side_effect = RateLimitedError("HTTP 432", status_code=432)
     client = OfficialCliClient(
         settings(tmp_path, legacy_extend_enabled=True),
         legacy_client=legacy,
@@ -239,6 +239,18 @@ async def test_legacy_circuit_is_read_only_in_dry_run(tmp_path):
 
     assert await client.fetch_extend("9") == {}
     assert not (tmp_path / "legacy.json").exists()
+
+
+async def test_legacy_upstream_failure_also_opens_optional_circuit(tmp_path):
+    legacy = AsyncMock()
+    legacy.fetch_extend_strict.side_effect = UpstreamError("invalid HTML")
+    client = OfficialCliClient(
+        settings(tmp_path, legacy_extend_enabled=True), legacy_client=legacy
+    )
+
+    assert await client.fetch_extend("9") == {}
+    state = json.loads((tmp_path / "legacy.json").read_text())
+    assert state["last_error"] == {"kind": "upstream", "message": "UpstreamError"}
 
 
 def test_official_status_parsing_supports_images_truncation_and_detail_url():
