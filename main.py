@@ -25,6 +25,7 @@ from src.sender import PostPusher
 from src.state import StateStore
 from src.weibo import RateLimitedError, WeiboClient, extract_mblogs
 from src.weibo_cli import OfficialCliClient, check_cli_install
+from src.weibo_hybrid import HybridClient
 
 
 def load_accounts(path: str | Path) -> list[Account]:
@@ -94,6 +95,16 @@ async def _run(settings: Settings, *, once: bool, dry_run: bool) -> None:
                 legacy_client=mobile_client if settings.legacy_extend_enabled else None,
                 read_only=dry_run,
             )
+        elif settings.weibo_source == "hybrid":
+            cli_client = OfficialCliClient(
+                settings,
+                legacy_client=mobile_client if settings.legacy_extend_enabled else None,
+                read_only=dry_run,
+            )
+            weibo_client = HybridClient(
+                settings, mobile_client, cli_client, read_only=dry_run
+            )
+            await weibo_client.ensure_cookie()
         else:
             weibo_client = mobile_client
             await weibo_client.ensure_cookie()
@@ -176,7 +187,7 @@ def _self_check(settings: Settings, config_path: str | Path | None = None) -> No
         if path.stat().st_mode & 0o077:
             raise RuntimeError(f"sensitive file permissions must be 0600: {path}")
 
-    if settings.weibo_source == "official_cli":
+    if settings.weibo_source in ("official_cli", "hybrid"):
         check_cli_install(settings)
 
     from playwright.sync_api import sync_playwright
@@ -218,7 +229,8 @@ async def _probe(settings: Settings, uid: str | None) -> int:
 
 
 async def _source_check(settings: Settings) -> int:
-    if settings.weibo_source != "official_cli":
+    # hybrid 的兜底源必须随时可用，与 official_cli 同样检查 CLI 就绪
+    if settings.weibo_source not in ("official_cli", "hybrid"):
         print("source-check ok: mobile source configured")
         return 0
     try:

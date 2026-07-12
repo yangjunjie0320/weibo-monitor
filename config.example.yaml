@@ -16,9 +16,11 @@ accounts_file: "accounts.yaml"
 state_file: "state/seen.json"
 health_file: "state/health.json"
 
-# 微博主数据源：官方 CLI Plus 批量接口。34 个账号会交错分成两组，
-# 每组取最新 5 条；每小时一轮约消耗 7200 Credits/月。
-weibo_source: "official_cli"
+# 微博主数据源：
+#   official_cli —— 官方 CLI Plus 批量接口，34 账号分两组每小时一轮约 7200 Credits/月
+#   mobile —— m.weibo.cn 登录 cookie 抓取，免 Credits，被限流时全局熔断
+#   hybrid —— mobile 为主（0 Credits），被限流期间自动切 official_cli，恢复自动切回
+weibo_source: "hybrid"
 weibo_cli_path: ".tools/weibo-cli/node_modules/.bin/weibo"
 weibo_cli_version: "0.8.3"
 weibo_cli_timeout: 60.0
@@ -31,6 +33,12 @@ weibo_cli_count: 5
 legacy_extend_enabled: true
 legacy_extend_state_file: "state/legacy-extend.json"
 legacy_extend_cooldown_seconds: 43200
+
+# hybrid 模式：mobile 被限流后的熔断状态（持久化，重启不重置）；
+# 短时间内反复被限流时退避指数升级，30 分钟起步、12 小时封顶
+hybrid_state_file: "state/hybrid-source.json"
+hybrid_block_initial_seconds: 1800
+hybrid_block_max_seconds: 43200
 
 # 轮询节奏
 poll_interval_seconds: 3600     # 每轮间隔（秒）；Plus 额度内方案为 1 小时

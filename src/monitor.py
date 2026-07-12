@@ -135,7 +135,7 @@ class Monitor:
     async def run_cycle(self) -> dict[str, Any]:
         # official_cli 模式下长文展开仍走 m.weibo.cn，同样依赖登录 cookie
         needs_cookie = (
-            self._settings.weibo_source == "mobile"
+            self._settings.weibo_source in ("mobile", "hybrid")
             or self._settings.legacy_extend_enabled
         )
         if needs_cookie and await ensure_fresh_cookie(self._settings):
@@ -143,6 +143,7 @@ class Monitor:
         accounts = list(self._accounts)
         random.shuffle(accounts)
         summary: dict[str, Any] = empty_cycle(len(accounts))
+        summary["source"] = self._settings.weibo_source
         consecutive_upstream_failures = 0
         self._health.write(status="starting", cycle=_cycle_stats(summary), last_error=None)
 
@@ -234,7 +235,13 @@ class Monitor:
                 cycle=_cycle_stats(summary),
                 last_error=summary.get("last_error"),
             )
-            if index < len(accounts) - 1 and self._settings.weibo_source == "mobile":
+            # hybrid 轮中可能切源，每次迭代都问 client 当前是否需要防封延迟
+            needs_delay = getattr(
+                self._client,
+                "requires_account_delay",
+                self._settings.weibo_source == "mobile",
+            )
+            if index < len(accounts) - 1 and needs_delay:
                 await asyncio.sleep(
                     random.uniform(
                         self._settings.account_delay_min_seconds,
@@ -242,9 +249,12 @@ class Monitor:
                     )
                 )
 
+        summary["source"] = getattr(
+            self._client, "active_source", self._settings.weibo_source
+        )
         logger.info(
             "cycle summary: accounts=%d attempted=%d succeeded=%d new=%d pushed=%d "
-            "dropped=%d failed=%d rate_limited=%s source_requests=%d",
+            "dropped=%d failed=%d rate_limited=%s source_requests=%d source=%s",
             summary["accounts_total"],
             summary["attempted"],
             summary["succeeded"],
@@ -254,6 +264,7 @@ class Monitor:
             summary["failed"],
             summary["rate_limited"],
             summary["source_requests"],
+            summary["source"],
         )
         return summary
 
@@ -419,7 +430,7 @@ def _error(kind: str, exc: BaseException) -> dict[str, str]:
     return {"kind": kind, "message": message or type(exc).__name__}
 
 
-def _cycle_stats(summary: dict[str, Any]) -> dict[str, int | bool]:
+def _cycle_stats(summary: dict[str, Any]) -> dict[str, int | bool | str]:
     return {
         "accounts_total": int(summary.get("accounts_total", 0)),
         "attempted": int(summary.get("attempted", 0)),
@@ -430,6 +441,7 @@ def _cycle_stats(summary: dict[str, Any]) -> dict[str, int | bool]:
         "dropped": int(summary.get("dropped", 0)),
         "rate_limited": bool(summary.get("rate_limited", False)),
         "source_requests": int(summary.get("source_requests", 0)),
+        "source": str(summary.get("source", "")),
     }
 
 

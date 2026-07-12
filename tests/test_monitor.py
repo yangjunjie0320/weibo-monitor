@@ -138,6 +138,38 @@ async def test_official_source_prepares_once_and_skips_account_delays(tmp_path, 
     sleeper.assert_not_awaited()
 
 
+async def test_account_delay_follows_client_active_source(tmp_path, monkeypatch):
+    """hybrid 轮中切到 CLI 后（requires_account_delay=False）不再做防封延迟。"""
+
+    class NoDelayWeibo(FakeWeibo):
+        requires_account_delay = False
+
+    configured = Settings(
+        weibo_source="hybrid",
+        state_file=str(tmp_path / "seen.json"),
+        account_delay_min_seconds=8,
+        account_delay_max_seconds=15,
+        cookie_refresh_enabled=False,
+        legacy_extend_enabled=False,
+        forward_enabled=False,
+    )
+    sleeper = AsyncMock()
+    monkeypatch.setattr("src.monitor.asyncio.sleep", sleeper)
+    monitor = Monitor(
+        configured,
+        NoDelayWeibo({1: timeline()}),
+        StateStore(configured.state_file),
+        FakePusher(),
+        [ACCOUNT, Account(name="第二个", uid="43")],
+        HealthStore(tmp_path / "health.json"),
+    )
+
+    summary = await monitor.run_cycle()
+
+    sleeper.assert_not_awaited()
+    assert summary["source"] == "hybrid"
+
+
 async def test_official_source_refreshes_cookie_for_legacy_extend(tmp_path, monkeypatch):
     """official_cli 模式下长文展开仍依赖 cookie，过期时也应刷新并重载。"""
 

@@ -31,8 +31,9 @@ class Settings(BaseSettings):
     state_file: str = "state/seen.json"
     health_file: str = "state/health.json"
 
-    # 微博主数据源。official_cli 走开放平台批量接口；mobile 仅保留为兼容路径。
-    weibo_source: Literal["official_cli", "mobile"] = "official_cli"
+    # 微博主数据源。official_cli 走开放平台批量接口；mobile 走 m.weibo.cn；
+    # hybrid 以 mobile 为主、mobile 被限流期间自动切 official_cli 兜底。
+    weibo_source: Literal["official_cli", "mobile", "hybrid"] = "official_cli"
     weibo_cli_path: str = ".tools/weibo-cli/node_modules/.bin/weibo"
     weibo_cli_version: str = "0.8.3"
     weibo_cli_timeout: float = Field(default=60.0, gt=0)
@@ -42,6 +43,9 @@ class Settings(BaseSettings):
     legacy_extend_enabled: bool = True
     legacy_extend_state_file: str = "state/legacy-extend.json"
     legacy_extend_cooldown_seconds: int = Field(default=43200, gt=0)
+    hybrid_state_file: str = "state/hybrid-source.json"
+    hybrid_block_initial_seconds: int = Field(default=1800, gt=0)
+    hybrid_block_max_seconds: int = Field(default=43200, gt=0)
 
     # 卡片转发按钮：点击转发到目标群，回调走长连接（需在开放平台把回调订阅
     # 方式设为长连接）。转发记录先落本地，再周期同步到多维表格归档。
