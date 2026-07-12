@@ -377,12 +377,19 @@ async def _get_access_token(settings: Settings, path: str) -> str:
         return token
 
 
+# security(1) 替身目录：让 CLI 的钥匙串后端永远失败，凭证固定存加密文件。
+# 钥匙串只在 gui 会话可用，会把轮换后的 refresh token 困在 ssh 读不到的地方
+# （ssh 部署门禁因此反复认证失败）；文件后端两个上下文都能读写。
+_NO_KEYCHAIN_DIR = Path(__file__).resolve().parent.parent / "tools" / "no-keychain"
+
+
 async def _run_process(
     settings: Settings,
     path: str,
     arguments: list[str],
     env: dict[str, str],
 ) -> tuple[int, bytes, bytes]:
+    env["PATH"] = f"{_NO_KEYCHAIN_DIR}{os.pathsep}{env.get('PATH', '')}"
     try:
         process = await asyncio.create_subprocess_exec(
             path,

@@ -269,6 +269,27 @@ async def test_legacy_rate_limit_is_persisted_and_does_not_propagate(tmp_path):
     after_restart.fetch_extend_strict.assert_not_awaited()
 
 
+async def test_run_process_blocks_keychain_backend(tmp_path):
+    """CLI 子进程的 PATH 应优先命中 security 替身，钥匙串后端必须失败。"""
+    from src.weibo_cli import _NO_KEYCHAIN_DIR, _run_process
+
+    script = tmp_path / "probe"
+    script.write_text(
+        '#!/bin/sh\ncommand -v security\nsecurity >/dev/null 2>&1; echo "rc=$?"\n',
+        encoding="utf-8",
+    )
+    script.chmod(0o755)
+
+    returncode, stdout, _ = await _run_process(
+        settings(tmp_path), str(script), [], dict(os.environ)
+    )
+
+    assert returncode == 0
+    lines = stdout.decode().splitlines()
+    assert lines[0] == str(_NO_KEYCHAIN_DIR / "security")
+    assert lines[1] == "rc=1"
+
+
 def test_reload_static_cookie_delegates_to_legacy_client(tmp_path):
     legacy = AsyncMock()
     client = OfficialCliClient(

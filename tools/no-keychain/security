@@ -1,0 +1,9 @@
+#!/bin/sh
+# weibo-cli 调用的 security(1) 替身，永远失败。
+#
+# 为什么：CLI 的 refresh token 每次使用后轮换。macOS 钥匙串只在 gui 会话
+# 解锁，ssh 会话（部署门禁）读不到；一旦 gui 域的服务把轮换后的 token 写进
+# 钥匙串，ssh 侧就只剩加密文件里的废 token，部署必挂。把钥匙串后端禁掉，
+# CLI 落到 ~/.weibo-cli/credentials/ 的加密文件后端（机器派生密钥，
+# ssh/gui 都能读写），两个上下文共享同一会话。
+exit 1
