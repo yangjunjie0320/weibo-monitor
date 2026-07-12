@@ -120,6 +120,18 @@ async def _is_logged_in(context: Any) -> bool:
         return False
 
 
+async def _trigger_sso(context: Any, timeout_ms: int) -> None:
+    """访问 weibo.com 主站触发 SSO 重建 .weibo.cn 登录态。
+
+    m.weibo.cn 侧的会话可能先于主站会话过期，此时 profile 并没有真失效，
+    访问一次主站即可恢复（2026-07-12 踩过的坑）。
+    """
+    with suppress(Exception):
+        page = context.pages[0] if context.pages else await context.new_page()
+        await page.goto(LOGIN_URL, wait_until="domcontentloaded", timeout=timeout_ms)
+        await asyncio.sleep(2.0)
+
+
 async def refresh_weibo_cookie(settings: Settings) -> bool:
     """从持久 profile 无头导出新 cookie 写到 weibo_cookie_file。"""
     if not settings.weibo_cookie_file:
@@ -133,11 +145,13 @@ async def refresh_weibo_cookie(settings: Settings) -> bool:
             timeout_ms=timeout_ms,
         ) as context:
             if not await _is_logged_in(context):
-                logger.warning(
-                    "browser profile is not logged in; run "
-                    "`python main.py --browser-login` once"
-                )
-                return False
+                await _trigger_sso(context, timeout_ms)
+                if not await _is_logged_in(context):
+                    logger.warning(
+                        "browser profile is not logged in; run "
+                        "`python main.py --browser-login` once"
+                    )
+                    return False
             cookies = await _export_cookies(context, timeout_ms)
     except BrowserUnavailableError as exc:
         logger.warning("cookie refresh unavailable: %s", exc)

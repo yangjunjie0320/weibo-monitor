@@ -117,6 +117,7 @@ async def test_official_source_prepares_once_and_skips_account_delays(tmp_path, 
         state_file=str(tmp_path / "seen.json"),
         account_delay_min_seconds=8,
         account_delay_max_seconds=15,
+        cookie_refresh_enabled=False,
         forward_enabled=False,
     )
     client = PreparedWeibo()
@@ -137,6 +138,70 @@ async def test_official_source_prepares_once_and_skips_account_delays(tmp_path, 
     sleeper.assert_not_awaited()
 
 
+async def test_official_source_refreshes_cookie_for_legacy_extend(tmp_path, monkeypatch):
+    """official_cli 模式下长文展开仍依赖 cookie，过期时也应刷新并重载。"""
+
+    class ReloadingWeibo(FakeWeibo):
+        def __init__(self):
+            super().__init__({1: timeline()})
+            self.reloads = 0
+
+        def reload_static_cookie(self):
+            self.reloads += 1
+
+    configured = Settings(
+        weibo_source="official_cli",
+        legacy_extend_enabled=True,
+        state_file=str(tmp_path / "seen.json"),
+        account_delay_min_seconds=0,
+        account_delay_max_seconds=0,
+        forward_enabled=False,
+    )
+    refresher = AsyncMock(return_value=True)
+    monkeypatch.setattr("src.monitor.ensure_fresh_cookie", refresher)
+    client = ReloadingWeibo()
+    monitor = Monitor(
+        configured,
+        client,
+        StateStore(configured.state_file),
+        FakePusher(),
+        [ACCOUNT],
+        HealthStore(tmp_path / "health.json"),
+    )
+
+    await monitor.run_cycle()
+
+    refresher.assert_awaited_once()
+    assert client.reloads == 1
+
+
+async def test_official_source_skips_cookie_refresh_without_legacy_extend(
+    tmp_path, monkeypatch
+):
+    configured = Settings(
+        weibo_source="official_cli",
+        legacy_extend_enabled=False,
+        state_file=str(tmp_path / "seen.json"),
+        account_delay_min_seconds=0,
+        account_delay_max_seconds=0,
+        forward_enabled=False,
+    )
+    refresher = AsyncMock(return_value=True)
+    monkeypatch.setattr("src.monitor.ensure_fresh_cookie", refresher)
+    monitor = Monitor(
+        configured,
+        FakeWeibo({1: timeline()}),
+        StateStore(configured.state_file),
+        FakePusher(),
+        [ACCOUNT],
+        HealthStore(tmp_path / "health.json"),
+    )
+
+    await monitor.run_cycle()
+
+    refresher.assert_not_awaited()
+
+
 async def test_official_prepare_rate_limit_aborts_before_accounts(tmp_path):
     from src.weibo import RateLimitedError
 
@@ -150,6 +215,7 @@ async def test_official_prepare_rate_limit_aborts_before_accounts(tmp_path):
     configured = Settings(
         weibo_source="official_cli",
         state_file=str(tmp_path / "seen.json"),
+        cookie_refresh_enabled=False,
         forward_enabled=False,
     )
     monitor = Monitor(

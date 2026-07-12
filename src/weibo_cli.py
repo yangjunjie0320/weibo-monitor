@@ -158,7 +158,8 @@ class OfficialCliClient:
         """Compatibility no-op: OAuth is managed by the official CLI/keychain."""
 
     def reload_static_cookie(self) -> None:
-        """Compatibility no-op for the monitor client contract."""
+        if self._legacy is not None:
+            self._legacy.reload_static_cookie()
 
     async def prepare_cycle(self, accounts: list[Account]) -> None:
         self._cache = {account.uid: [] for account in accounts}

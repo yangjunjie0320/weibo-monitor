@@ -133,9 +133,12 @@ class Monitor:
             await asyncio.sleep(delay)
 
     async def run_cycle(self) -> dict[str, Any]:
-        if self._settings.weibo_source == "mobile" and await ensure_fresh_cookie(
-            self._settings
-        ):
+        # official_cli 模式下长文展开仍走 m.weibo.cn，同样依赖登录 cookie
+        needs_cookie = (
+            self._settings.weibo_source == "mobile"
+            or self._settings.legacy_extend_enabled
+        )
+        if needs_cookie and await ensure_fresh_cookie(self._settings):
             self._client.reload_static_cookie()
         accounts = list(self._accounts)
         random.shuffle(accounts)
